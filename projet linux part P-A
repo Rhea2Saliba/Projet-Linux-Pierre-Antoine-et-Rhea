@@ -140,3 +140,60 @@ print(f"Performance Totale: {(cumulative_value_cross.iloc[-1] - initial_investme
 
 print("\n--- Tableau de comparaison final (dernières lignes) ---")
 print(final_df[['Buy_and_Hold_Value', 'Momentum_50D_MMS', STRATEGY_NAME_CROSS]].tail())
+
+# Continuer à partir du DataFrame 'asset_prices', 'daily_returns', et 'initial_investment'
+
+# --- 10. IMPLÉMENTATION DE LA STRATÉGIE DE BANDES DE BOLLINGER ---
+
+# Définir les paramètres
+BB_WINDOW = 20  # Période de la MMS et du calcul de l'écart-type
+N_STD_DEV = 2.0 # Multiplicateur de l'écart-type (souvent 2)
+STRATEGY_NAME_BB = f'Bollinger_Bands_{BB_WINDOW}D'
+
+# 1. Calculer les Bandes de Bollinger
+# Bande Moyenne (MMS)
+asset_prices.loc[:, 'BB_Mid'] = asset_prices[ticker_symbol].rolling(window=BB_WINDOW).mean()
+# Écart-type (Volatility)
+asset_prices.loc[:, 'BB_Std'] = asset_prices[ticker_symbol].rolling(window=BB_WINDOW).std()
+# Bandes Supérieure et Inférieure
+asset_prices.loc[:, 'BB_Upper'] = asset_prices['BB_Mid'] + (asset_prices['BB_Std'] * N_STD_DEV)
+asset_prices.loc[:, 'BB_Lower'] = asset_prices['BB_Mid'] - (asset_prices['BB_Std'] * N_STD_DEV)
+
+# 2. Générer le Signal de Trading (Logique de Réversion à la Moyenne)
+
+# 2a. Signal d'ENTRÉE (Achat) : Le prix est inférieur à la Bande Inférieure
+# On utilise une colonne temporaire pour marquer les jours d'entrée
+asset_prices.loc[:, 'Entry_Signal'] = np.where(asset_prices[ticker_symbol] < asset_prices['BB_Lower'], 1.0, 0.0)
+
+# 2b. Maintenir/Sortir : Définir la position (1 pour position ouverte, 0 pour neutre)
+# Ici, nous allons simplifier : si le prix est en dessous de la bande moyenne, la position est maintenue.
+# Sinon, elle est fermée. (Ceci est une des nombreuses façons de gérer la sortie)
+asset_prices.loc[:, 'Position'] = asset_prices['Entry_Signal'].replace(to_replace=0.0, method='ffill')
+asset_prices.loc[:, 'Position'] = np.where(asset_prices[ticker_symbol] > asset_prices['BB_Mid'], 0.0, asset_prices['Position'])
+asset_prices.loc[:, 'Position'] = asset_prices['Position'].fillna(0)
+
+
+# 3. Calculer les rendements de la stratégie
+# Rendement Stratégie = Rendements Journaliers * Position décalée d'un jour
+strategy_returns_bb = daily_returns.shift(-1) * asset_prices['Position'].shift(1)
+strategy_returns_bb = strategy_returns_bb.fillna(0)
+
+# 4. Calculer la valeur cumulative de la stratégie des Bandes de Bollinger
+cumulative_value_bb = (1 + strategy_returns_bb).cumprod() * initial_investment
+cumulative_value_bb.name = STRATEGY_NAME_BB
+
+# --- 11. MISE À JOUR DU DASHBOARD ET DES MÉTRIQUES ---
+
+# A. Mettre à jour le DataFrame final pour le graphique
+final_df[STRATEGY_NAME_BB] = cumulative_value_bb
+
+# B. Calculer les métriques
+max_dd_bb = calculate_max_drawdown(cumulative_value_bb)
+sharpe_bb = calculate_sharpe_ratio(strategy_returns_bb, risk_free_rate=0.03)
+
+print("\n--- Aperçu des performances de la stratégie Bandes de Bollinger ---")
+print(f"Sharpe Ratio annualisé : {sharpe_bb:.2f}, Max Drawdown : {max_dd_bb:.2%}") 
+print(f"Performance Totale: {(cumulative_value_bb.iloc[-1] - initial_investment) / initial_investment:.2%}")
+
+print("\n--- Tableau de comparaison final (4 stratégies) ---")
+print(final_df[['Buy_and_Hold_Value', 'Momentum_50D_MMS', STRATEGY_NAME_CROSS, STRATEGY_NAME_BB]].tail())
