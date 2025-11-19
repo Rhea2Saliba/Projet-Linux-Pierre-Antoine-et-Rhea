@@ -38,8 +38,6 @@ except Exception as e:
 
 # Calcul des rendements journaliers (CORRECTION DE LA NAMEERROR)
 daily_returns = asset_prices[ticker_symbol].pct_change().fillna(0)
-
-# Calcul de la valeur cumulative de la stratégie Buy-and-Hold
 cumulative_value_buy_hold = (1 + daily_returns).cumprod() * initial_investment
 cumulative_value_buy_hold.name = 'Buy_and_Hold_Value'
 
@@ -95,48 +93,3 @@ print(f"Performance Totale: {(cumulative_value_momentum.iloc[-1] - initial_inves
 
 print("\n--- Tableau de comparaison (dernières lignes) ---")
 print(final_df[['Raw_Price_Value', 'Buy_and_Hold_Value', STRATEGY_NAME]].tail())
-
-# Continuer à partir du DataFrame 'asset_prices', 'daily_returns', et 'initial_investment'
-
-# --- 8. IMPLÉMENTATION DE LA STRATÉGIE DE CROISEMENT DE MMS ---
-
-# Définir les paramètres
-SHORT_WINDOW = 20  # MMS Courte (Rapide)
-LONG_WINDOW = 100  # MMS Longue (Lente)
-STRATEGY_NAME_CROSS = f'Cross_MMS_{SHORT_WINDOW}_{LONG_WINDOW}'
-
-# 1. Calculer les deux Moyennes Mobiles
-asset_prices.loc[:, 'MMS_Short'] = asset_prices[ticker_symbol].rolling(window=SHORT_WINDOW).mean()
-asset_prices.loc[:, 'MMS_Long'] = asset_prices[ticker_symbol].rolling(window=LONG_WINDOW).mean()
-
-# 2. Générer le signal de trading initial
-# Signal initial : 1.0 (Achat) si MMS Courte > MMS Longue, 0.0 (Neutre) sinon
-asset_prices.loc[:, 'Signal_Cross'] = np.where(asset_prices['MMS_Short'] > asset_prices['MMS_Long'], 1.0, 0.0)
-
-# 3. Calculer les positions (Pour simuler l'entrée/sortie, on décale le signal)
-# On prend le signal à partir du jour où le croisement s'est produit
-# On garde la position du jour précédent si le signal n'a pas changé.
-# Pandas .diff() permet de trouver quand le signal est passé de 0 à 1 ou de 1 à 0.
-# Cependant, pour simplifier, on utilise simplement le signal décalé d'un jour.
-strategy_returns_cross = daily_returns.shift(-1) * asset_prices['Signal_Cross'].shift(1)
-strategy_returns_cross = strategy_returns_cross.fillna(0)
-
-# 4. Calculer la valeur cumulative de la stratégie de Croisement
-cumulative_value_cross = (1 + strategy_returns_cross).cumprod() * initial_investment
-cumulative_value_cross.name = STRATEGY_NAME_CROSS
-
-# --- 9. MISE À JOUR DU DASHBOARD ET DES MÉTRIQUES ---
-
-# A. Mettre à jour le DataFrame final pour le graphique
-final_df[STRATEGY_NAME_CROSS] = cumulative_value_cross
-
-# B. Calculer les métriques
-max_dd_cross = calculate_max_drawdown(cumulative_value_cross)
-sharpe_cross = calculate_sharpe_ratio(strategy_returns_cross, risk_free_rate=0.03)
-
-print("\n--- Aperçu des performances de la stratégie Croisement MMS ---")
-print(f"Sharpe Ratio annualisé : {sharpe_cross:.2f}, Max Drawdown : {max_dd_cross:.2%}") 
-print(f"Performance Totale: {(cumulative_value_cross.iloc[-1] - initial_investment) / initial_investment:.2%}")
-
-print("\n--- Tableau de comparaison final (dernières lignes) ---")
-print(final_df[['Buy_and_Hold_Value', 'Momentum_50D_MMS', STRATEGY_NAME_CROSS]].tail())
