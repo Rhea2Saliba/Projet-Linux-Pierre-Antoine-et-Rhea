@@ -3,8 +3,11 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 from sklearn.linear_model import LinearRegression
+from sklearn.ensemble import RandomForestRegressor
+from statsmodels.tsa.arima.model import ARIMA
 from datetime import date, timedelta
 import itertools
+
 
 # --- 1. CLASSE D'ANALYSE (Backend Logic) ---
 class SingleAssetAnalyzer:
@@ -135,23 +138,89 @@ class SingleAssetAnalyzer:
                 best_p = {'window': w, 'std_dev': std}
         self.best_params['Mean Reversion (BB)'] = best_p
 
-    def predict_future(self, days_ahead=30):
-        """Régression linéaire pour prédiction."""
-        df_pred = self.data.copy().reset_index()
-        df_pred['Date_Ordinal'] = df_pred['Date'].map(pd.Timestamp.toordinal)
-        X = df_pred[['Date_Ordinal']].values
-        y = df_pred['Close'].values
-        model = LinearRegression().fit(X, y)
-        
-        last_date = df_pred['Date'].iloc[-1]
+#new fontion pour les différents modèles    
+    def predict_future(self, days_ahead=30, model_type="Linear Regression"):
+        """
+        Génère des prédictions selon le modèle choisi :
+        1. Linear Regression (Tendance simple)
+        2. ARIMA (Séries temporelles, capture les cycles)
+        3. Random Forest (Machine Learning, capture les motifs complexes)
+        """
+        df = self.data.copy()
+        last_date = df.index[-1]
         future_dates = [last_date + timedelta(days=i) for i in range(1, days_ahead + 1)]
-        future_ordinals = [[d.toordinal()] for d in future_dates]
-        predictions = model.predict(future_ordinals)
         
-        residuals = y - model.predict(X)
-        std_resid = np.std(residuals)
-        return future_dates, predictions, std_resid
+        # --- MODÈLE 1 : RÉGRESSION LINÉAIRE ---
+        if model_type == "Linear Regression":
+            df = df.reset_index()
+            df['Date_Ordinal'] = df['Date'].map(pd.Timestamp.toordinal)
+            X = df[['Date_Ordinal']].values
+            y = df['Close'].values
+            
+            model = LinearRegression().fit(X, y)
+            
+            future_ordinals = [[d.toordinal()] for d in future_dates]
+            preds = model.predict(future_ordinals)
+            
+            # Ecart-type des erreurs passées pour l'intervalle de confiance
+            residuals = y - model.predict(X)
+            std_dev = np.std(residuals)
+            return future_dates, preds, std_dev
 
+        # --- MODÈLE 2 : ARIMA (AutoRegressive Integrated Moving Average) ---
+        elif model_type == "ARIMA":
+            # On utilise (5,1,0) : regarde les 5 derniers jours, différencie 1 fois
+            history = df['Close'].values
+            # Suppress warnings si nécessaire dans Kaggle
+            model = ARIMA(history, order=(5,1,0)) 
+            model_fit = model.fit()
+            
+            preds = model_fit.forecast(steps=days_ahead)
+            
+            # Erreur estimée via les résidus du modèle
+            residuals = model_fit.resid
+            # On exclut le tout premier résidu souvent aberrant (NaN ou 0)
+            std_dev = np.std(residuals[1:]) 
+            return future_dates, preds, std_dev
+
+        # --- MODÈLE 3 : RANDOM FOREST (Machine Learning) ---
+        elif model_type == "Machine Learning (RF)":
+            # Création des "Features" (ce que le modèle regarde pour apprendre)
+            # Lag1 = prix d'hier, Lag2 = avant-hier, MA5 = moyenne 5 jours
+            df['Lag1'] = df['Close'].shift(1)
+            df['Lag2'] = df['Close'].shift(2)
+            df['MA5'] = df['Close'].rolling(5).mean()
+            df = df.dropna() # On enlève les lignes vides créées par le lag
+
+            X = df[['Lag1', 'Lag2', 'MA5']].values
+            y = df['Close'].values
+            
+            model = RandomForestRegressor(n_estimators=100, random_state=42)
+            model.fit(X, y)
+
+            # Prédiction Récursive (On prédit jour après jour)
+            preds = []
+            current_lag1 = df['Close'].iloc[-1]
+            current_lag2 = df['Close'].iloc[-2]
+            current_ma = df['MA5'].iloc[-1] # Simplification pour la démo
+
+            for _ in range(days_ahead):
+                # Le modèle prédit demain
+                pred = model.predict([[current_lag1, current_lag2, current_ma]])[0]
+                preds.append(pred)
+                
+                # On met à jour les variables pour le jour d'après
+                current_lag2 = current_lag1
+                current_lag1 = pred
+                # Note: Idéalement on recalculerait la MA ici, on garde fixe pour simplifier
+            
+            # Calcul de l'erreur moyenne sur l'entrainement
+            train_preds = model.predict(X)
+            std_dev = np.std(y - train_preds)
+            
+            return future_dates, np.array(preds), std_dev
+        
+        return [], [], 0 # Fallback si erreur
 # --- 2. INTERFACE STREAMLIT ---
 
 st.set_page_config(layout="wide", page_title="Smart Quant Lab")
