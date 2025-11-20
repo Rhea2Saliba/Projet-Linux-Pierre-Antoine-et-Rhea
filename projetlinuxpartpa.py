@@ -307,16 +307,15 @@ with st.sidebar:
         st.markdown("---")
 
 
+        st.markdown("---")
         st.header("3. Prédiction (Bonus)")
-        show_pred = st.checkbox("Activer le Futur 🔮")
         
-        # --- AJOUT : MENU DÉROULANT POUR CHOISIR LE MODÈLE ---
-        if show_pred:
-            model_choice = st.selectbox(
-                "Choisir le Modèle", 
-                ["Linear Regression", "ARIMA", "Machine Learning (RF)"]
-            )
-            forecast_days = st.slider("Jours à prédire", 7, 90, 30)
+        # Plus de checkbox, on affiche directement les contrôles
+        model_choice = st.selectbox(
+            "Choisir le Modèle", 
+            ["Linear Regression", "ARIMA", "Machine Learning (RF)"]
+        )
+        forecast_days = st.slider("Jours à prédire", 7, 90, 30)
 
 # --- AFFICHAGE PRINCIPAL ---
 
@@ -376,80 +375,131 @@ if st.session_state.analyzer:
         })
         st.line_chart(df_chart, color=["#FF4B4B", "#0068C9"])
 
-    # --- (Le reste du code: Section Battle Royale et Prédiction reste inchangé en dessous) ---
-    # 4. SECTION COMPARATIVE (Le "Battle" des stratégies optimisées)
+# 4. SECTION COMPARATIVE (Le "Battle" des stratégies optimisées)
     st.markdown("---")
     st.subheader("⚔️ Battle Royale : Comparaison des Modèles Optimisés")
     st.caption("Voici ce que ça donnerait si on prenait les MEILLEURS paramètres pour chaque stratégie sur cette période.")
 
-    # On recalcule les courbes optimales pour les afficher
-    curve_mom, _ = an.run_strategy("Momentum", **an.best_params['Momentum'])
-    curve_cross, _ = an.run_strategy("Cross MMS", **an.best_params['Cross MMS'])
-    curve_bb, _ = an.run_strategy("Mean Reversion (BB)", **an.best_params['Mean Reversion (BB)'])
+    # 1. On relance les calculs (cette fois on récupère 'ret' pour les métriques)
+    curve_mom, ret_mom = an.run_strategy("Momentum", **an.best_params['Momentum'])
+    curve_cross, ret_cross = an.run_strategy("Cross MMS", **an.best_params['Cross MMS'])
+    curve_bb, ret_bb = an.run_strategy("Mean Reversion (BB)", **an.best_params['Mean Reversion (BB)'])
 
+    # 2. Affichage du Graphique
     df_battle = pd.DataFrame({
         "Buy & Hold": bh_curve,
-        f"Momentum (Opti: {an.best_params['Momentum']['window']})": curve_mom,
+        f"Momentum (Opti)": curve_mom,
         f"Cross MMS (Opti)": curve_cross,
         f"Bollinger (Opti)": curve_bb
     })
     st.line_chart(df_battle)
 
+    # 3. TABLEAU DES RÉSULTATS (Le Podium)
+    st.subheader("🏆 Le Bulletin de Notes")
+
+    # On calcule les métriques pour tout le monde
+    met_bh = an.compute_metrics(an.daily_returns)
+    met_mom = an.compute_metrics(ret_mom)
+    met_cross = an.compute_metrics(ret_cross)
+    met_bb = an.compute_metrics(ret_bb)
+
+    # On construit un tableau propre
+    leaderboard_data = [
+        {
+            "Stratégie": "Buy & Hold (Marché)",
+            "Sharpe Ratio": met_bh['Sharpe'],
+            "Max Drawdown": met_bh['Max Drawdown'],
+            "Perf Totale": met_bh['Total Perf'],
+            "Capital Final ($)": f"{bh_curve.iloc[-1]:.2f} $"
+        },
+        {
+            "Stratégie": f"Momentum (Win: {an.best_params['Momentum']['window']})",
+            "Sharpe Ratio": met_mom['Sharpe'],
+            "Max Drawdown": met_mom['Max Drawdown'],
+            "Perf Totale": met_mom['Total Perf'],
+            "Capital Final ($)": f"{curve_mom.iloc[-1]:.2f} $"
+        },
+        {
+            "Stratégie": f"Cross MMS (S:{an.best_params['Cross MMS']['short_w']} L:{an.best_params['Cross MMS']['long_w']})",
+            "Sharpe Ratio": met_cross['Sharpe'],
+            "Max Drawdown": met_cross['Max Drawdown'],
+            "Perf Totale": met_cross['Total Perf'],
+            "Capital Final ($)": f"{curve_cross.iloc[-1]:.2f} $"
+        },
+        {
+            "Stratégie": f"Bollinger (W:{an.best_params['Mean Reversion (BB)']['window']} Std:{an.best_params['Mean Reversion (BB)']['std_dev']})",
+            "Sharpe Ratio": met_bb['Sharpe'],
+            "Max Drawdown": met_bb['Max Drawdown'],
+            "Perf Totale": met_bb['Total Perf'],
+            "Capital Final ($)": f"{curve_bb.iloc[-1]:.2f} $"
+        }
+    ]
+
+    # Création du DataFrame pour l'affichage
+    df_leaderboard = pd.DataFrame(leaderboard_data)
+    
+    # On met la stratégie en index pour que ce soit plus joli
+    df_leaderboard.set_index("Stratégie", inplace=True)
+
+    # On trie par Sharpe Ratio décroissant (le meilleur en haut)
+    # Note : Sharpe est un float, les autres sont des strings formatés (%), donc on trie sur Sharpe
+    df_leaderboard.sort_values(by="Sharpe Ratio", ascending=False, inplace=True)
+
+    # Affichage du tableau
+    st.dataframe(df_leaderboard, use_container_width=True)
     # B. SECTION PRÉDICTION
-    if show_pred:
-        st.markdown("---")
-        st.subheader(f"🔮 Prédiction Future : {model_choice}")
-        
-        # Appel de la nouvelle fonction avec le paramètre 'model_choice'
-        with st.spinner(f"Calcul du modèle {model_choice} en cours..."):
-            fut_d, fut_p, std = an.predict_future(forecast_days, model_type=model_choice)
-        
-        # Préparation des données pour le graph
-        recent = an.data['Close'].tail(180) # On montre les 6 derniers mois d'historique
-        df_fut = pd.DataFrame({"Pred": fut_p}, index=fut_d)
-        # --- CORRECTION CÔNE D'INCERTITUDE ---
-        # On crée un vecteur qui augmente avec le temps : [1, 1.41, 1.73, 2.0 ...] (racine carrée des jours)
-        import numpy as np
-        time_scaling = np.sqrt(np.arange(1, len(df_fut) + 1))
-        
-        # On applique ce facteur à l'écart-type
-        # Plus on va loin dans le temps, plus l'écart-type est multiplié
-        df_fut["High"] = df_fut["Pred"] + (1.96 * std * time_scaling)
-        df_fut["Low"] = df_fut["Pred"] - (1.96 * std * time_scaling)
+    
+# B. SECTION PRÉDICTION (Plus de "if show_pred")
+    st.markdown("---")
+    st.subheader(f"🔮 Prédiction Future : {model_choice}")
+    
+    # Appel de la fonction
+    with st.spinner(f"Calcul du modèle {model_choice} en cours..."):
+        fut_d, fut_p, std = an.predict_future(forecast_days, model_type=model_choice)
+    
+    # Préparation des données
+    recent = an.data['Close'].tail(180)
+    df_fut = pd.DataFrame({"Pred": fut_p}, index=fut_d)
+    
+    # Cône d'incertitude
+    import numpy as np
+    time_scaling = np.sqrt(np.arange(1, len(df_fut) + 1))
+    df_fut["High"] = df_fut["Pred"] + (1.96 * std * time_scaling)
+    df_fut["Low"] = df_fut["Pred"] - (1.96 * std * time_scaling)
         
         # -------------------------------------
 
-        import matplotlib.pyplot as plt
-        fig, ax = plt.subplots(figsize=(12, 5))
+    import matplotlib.pyplot as plt
+    fig, ax = plt.subplots(figsize=(12, 5))
         
-        ax.plot(recent.index, recent.values, label="Historique Récent", color="black", alpha=0.6)
-        ax.plot(df_fut.index, df_fut["Pred"], label=f"Prédiction ({model_choice})", color="#0068C9", linestyle="--", linewidth=2)
-        ax.fill_between(df_fut.index, df_fut["Low"], df_fut["High"], color="#0068C9", alpha=0.15, label="Zone de Confiance 95%")
+    ax.plot(recent.index, recent.values, label="Historique Récent", color="black", alpha=0.6)
+    ax.plot(df_fut.index, df_fut["Pred"], label=f"Prédiction ({model_choice})", color="#0068C9", linestyle="--", linewidth=2)
+    ax.fill_between(df_fut.index, df_fut["Low"], df_fut["High"], color="#0068C9", alpha=0.15, label="Zone de Confiance 95%")
         
-        ax.set_title(f"Projection {ticker} sur {forecast_days} jours")
-        ax.legend()
-        ax.grid(True, alpha=0.2)
+    ax.set_title(f"Projection {ticker} sur {forecast_days} jours")
+    ax.legend()
+    ax.grid(True, alpha=0.2)
         
-        st.pyplot(fig)
+    st.pyplot(fig)
         
         # Petit texte explicatif selon le modèle choisi
-        if model_choice == "ARIMA":
-            st.info("ℹ️ **ARIMA** analyse les cycles passés. Idéal pour les marchés volatils à court terme, essayez de l'appliquer au bitcoin par exemple.")
-        elif model_choice == "Machine Learning (RF)":
-            st.info("ℹ️ **Random Forest** utilise l'IA pour repérer des motifs complexes (prix d'hier, avant-hier, moyennes).")
-        else:
-            st.warning("⚠️ **Régression Linéaire** : Trace juste une tendance droite. Attention, ne prédit pas les chutes ! Ce modèle est plus adapté pour les  cours stables, essayez plutôt une action de père de famille, comme air liquide ;)")
+    if model_choice == "ARIMA":
+        st.info("ℹ️ **ARIMA** analyse les cycles passés. Idéal pour les marchés volatils à court terme, essayez de l'appliquer au bitcoin par exemple.")
+    elif model_choice == "Machine Learning (RF)":
+        st.info("ℹ️ **Random Forest** utilise l'IA pour repérer des motifs complexes (prix d'hier, avant-hier, moyennes).")
+    else:
+        st.warning("⚠️ **Régression Linéaire** : Trace juste une tendance droite. Attention, ne prédit pas les chutes ! Ce modèle est plus adapté pour les  cours stables, essayez plutôt une action de père de famille, comme air liquide ;)")
 
-        ticker_clean = ticker.upper()
+    ticker_clean = ticker.upper()
         #ajout du retour sur experience
         # CAS 1 : BITCOIN + ARIMA
-        if "BTC" in ticker_clean and model_choice == "ARIMA":
-            st.success("✅ Excellent choix ! Le Bitcoin est très volatil et cyclique, ARIMA est théoriquement le meilleur modèle pour capturer ces mouvements.")
+    if "BTC" in ticker_clean and model_choice == "ARIMA":
+        st.success("✅ Excellent choix ! Le Bitcoin est très volatil et cyclique, ARIMA est théoriquement le meilleur modèle pour capturer ces mouvements.")
 
         # CAS 2 : AIR LIQUIDE + REGRESSION LINEAIRE
         # (Le ticker Air Liquide sur Yahoo est souvent AI.PA)
-        elif ("AI.PA" in ticker_clean or "AIR LIQUIDE" in ticker_clean) and model_choice == "Linear Regression":
-            st.success("✅ Bien vu ! Air Liquide est une action très stable avec une tendance long terme claire. La Régression Linéaire suffit largement et sera très propre.")
+    elif ("AI.PA" in ticker_clean or "AIR LIQUIDE" in ticker_clean) and model_choice == "Linear Regression":
+        st.success("✅ Bien vu ! Air Liquide est une action très stable avec une tendance long terme claire. La Régression Linéaire suffit largement et sera très propre.")
 
 else:
     st.info("👈 Veuillez cliquer sur 'Charger Données & Scanner' dans la barre latérale pour commencer.")
