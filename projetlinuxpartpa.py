@@ -183,30 +183,37 @@ with st.sidebar:
         an = st.session_state.analyzer
         
         st.header("2. Contrôle Manuel")
-        strat_choice = st.selectbox("Stratégie Active", ["Momentum", "Cross MMS", "Mean Reversion (BB)"])
+        # 1. On ajoute l'option "TOUT COMPARER" dans la liste
+        strat_choice = st.selectbox("Stratégie Active", ["Momentum", "Cross MMS", "Mean Reversion (BB)", "TOUT COMPARER"])
         
-        current_params = {}
+        # On va stocker tous les paramètres ici
+        manual_params = {}
         
-        # AFFICHAGE INTELLIGENT : On montre les sliders MAIS aussi les valeurs recommandées
-        if strat_choice == "Momentum":
+        # BLOC MOMENTUM (S'affiche si Momentum OU Tout Comparer est choisi)
+        if strat_choice == "Momentum" or strat_choice == "TOUT COMPARER":
+            st.markdown("### Paramètres Momentum")
             rec = an.best_params['Momentum']['window']
-            st.info(f"💡 Suggestion IA : Fenêtre = {rec}")
-            current_params['window'] = st.slider("Fenêtre", 10, 200, 50)
+            st.caption(f"💡 Suggestion IA : {rec}")
+            # On stocke dans manual_params avec des clés précises
+            manual_params['mom_window'] = st.slider("Fenêtre Momentum", 10, 200, 50, key="mom_slider")
             
-        elif strat_choice == "Cross MMS":
+        # BLOC CROSS MMS
+        if strat_choice == "Cross MMS" or strat_choice == "TOUT COMPARER":
+            st.markdown("### Paramètres Cross MMS")
             rec_s = an.best_params['Cross MMS']['short_w']
             rec_l = an.best_params['Cross MMS']['long_w']
-            st.info(f"💡 Suggestion IA : Court={rec_s}, Long={rec_l}")
-            current_params['short_w'] = st.slider("Moyenne Courte", 5, 50, 20)
-            current_params['long_w'] = st.slider("Moyenne Longue", 50, 200, 100)
-            
-        elif strat_choice == "Mean Reversion (BB)":
+            st.caption(f"💡 Suggestion IA : Court={rec_s}, Long={rec_l}")
+            manual_params['cross_short'] = st.slider("MMS Court", 5, 50, 20, key="cross_s_slider")
+            manual_params['cross_long'] = st.slider("MMS Long", 50, 200, 100, key="cross_l_slider")
+
+        # BLOC BOLLINGER
+        if strat_choice == "Mean Reversion (BB)" or strat_choice == "TOUT COMPARER":
+            st.markdown("### Paramètres Bollinger")
             rec_w = an.best_params['Mean Reversion (BB)']['window']
             rec_std = an.best_params['Mean Reversion (BB)']['std_dev']
-            st.info(f"💡 Suggestion IA : Fenêtre={rec_w}, Std={rec_std}")
-            current_params['window'] = st.slider("Fenêtre BB", 10, 100, 20)
-            current_params['std_dev'] = st.slider("Écart-Type", 1.0, 3.0, 2.0)
-
+            st.caption(f"💡 Suggestion IA : Fenêtre={rec_w}, Std={rec_std}")
+            manual_params['bb_window'] = st.slider("Fenêtre BB", 10, 100, 20, key="bb_w_slider")
+            manual_params['bb_std'] = st.slider("Écart-Type", 1.0, 3.0, 2.0, key="bb_std_slider")
         st.markdown("---")
         st.header("3. Options")
         show_pred = st.checkbox("Voir Prédiction (ML)")
@@ -215,29 +222,61 @@ with st.sidebar:
 
 if st.session_state.analyzer:
     an = st.session_state.analyzer
-    
-    # 1. CALCULS (Stratégie Manuelle Choisie)
-    strat_curve, strat_rets = an.run_strategy(strat_choice, **current_params)
     bh_curve = (1 + an.daily_returns).cumprod() * an.initial_investment
-    
-    met_strat = an.compute_metrics(strat_rets)
-    met_bh = an.compute_metrics(an.daily_returns)
 
-    # 2. KPI (Haut de page)
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Stratégie", strat_choice)
-    c2.metric("Sharpe Ratio", met_strat['Sharpe'], delta=f"{met_strat['Sharpe'] - met_bh['Sharpe']:.2f} vs B&H")
-    c3.metric("Max Drawdown", met_strat['Max Drawdown'])
-    c4.metric("Gain Total", met_strat['Total Perf'])
+    # --- CAS 1 : COMPARAISON GLOBALE ---
+    if strat_choice == "TOUT COMPARER":
+        st.subheader("⚡ Comparaison Multi-Stratégies (Paramètres Manuels)")
+        
+        # On lance les 3 stratégies avec les paramètres récupérés des sliders
+        c_mom, _ = an.run_strategy("Momentum", window=manual_params['mom_window'])
+        c_cross, _ = an.run_strategy("Cross MMS", short_w=manual_params['cross_short'], long_w=manual_params['cross_long'])
+        c_bb, _ = an.run_strategy("Mean Reversion (BB)", window=manual_params['bb_window'], std_dev=manual_params['bb_std'])
+        
+        # On crée un gros DataFrame avec tout
+        df_all = pd.DataFrame({
+            "Buy & Hold": bh_curve,
+            "Momentum": c_mom,
+            "Cross MMS": c_cross,
+            "Bollinger": c_bb
+        })
+        
+        st.line_chart(df_all)
+        
+        # Petit tableau récapitulatif des gains finaux
+        st.write("### Valeurs Finales du Portefeuille")
+        res_finaux = df_all.iloc[-1].sort_values(ascending=False)
+        st.dataframe(res_finaux.map('{:.2f} $'.format))
 
-    # 3. GRAPHIQUE : MANUEL vs BUY & HOLD
-    st.subheader("📈 Analyse Détaillée : Manuel vs Marché")
-    df_chart = pd.DataFrame({
-        "Buy & Hold (Marché)": bh_curve,
-        f"Ma Stratégie ({strat_choice})": strat_curve
-    })
-    st.line_chart(df_chart, color=["#FF4B4B", "#0068C9"])
+    # --- CAS 2 : MODE SOLO (Comme avant) ---
+    else:
+        # On prépare les arguments selon la stratégie choisie
+        args = {}
+        if strat_choice == "Momentum": args = {'window': manual_params['mom_window']}
+        elif strat_choice == "Cross MMS": args = {'short_w': manual_params['cross_short'], 'long_w': manual_params['cross_long']}
+        elif strat_choice == "Mean Reversion (BB)": args = {'window': manual_params['bb_window'], 'std_dev': manual_params['bb_std']}
+        
+        # Calcul
+        strat_curve, strat_rets = an.run_strategy(strat_choice, **args)
+        met_strat = an.compute_metrics(strat_rets)
+        met_bh = an.compute_metrics(an.daily_returns)
 
+        # KPI (Haut de page)
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Stratégie", strat_choice)
+        c2.metric("Sharpe Ratio", met_strat['Sharpe'], delta=f"{met_strat['Sharpe'] - met_bh['Sharpe']:.2f} vs B&H")
+        c3.metric("Max Drawdown", met_strat['Max Drawdown'])
+        c4.metric("Gain Total", met_strat['Total Perf'])
+
+        # GRAPHIQUE SOLO
+        st.subheader(f"📈 Analyse : {strat_choice} vs Marché")
+        df_chart = pd.DataFrame({
+            "Buy & Hold (Marché)": bh_curve,
+            f"Ma Stratégie ({strat_choice})": strat_curve
+        })
+        st.line_chart(df_chart, color=["#FF4B4B", "#0068C9"])
+
+    # --- (Le reste du code: Section Battle Royale et Prédiction reste inchangé en dessous) ---
     # 4. SECTION COMPARATIVE (Le "Battle" des stratégies optimisées)
     st.markdown("---")
     st.subheader("⚔️ Battle Royale : Comparaison des Modèles Optimisés")
