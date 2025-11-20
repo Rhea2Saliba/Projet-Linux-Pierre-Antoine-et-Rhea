@@ -2,253 +2,276 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
-from datetime import date
+from sklearn.linear_model import LinearRegression
+from datetime import date, timedelta
 import itertools
 
-# --- 1. CLASSE D'ANALYSE D'ACTIF (Le coeur du système) ---
-
-class AssetAnalyzer:
-    def __init__(self, ticker, start_date, end_date, initial_investment=100):
+# --- 1. CLASSE D'ANALYSE (Backend Logic) ---
+class SingleAssetAnalyzer:
+    def __init__(self, ticker, start_date, end_date, initial_investment=1000):
         self.ticker = ticker
         self.start_date = start_date
         self.end_date = end_date
         self.initial_investment = initial_investment
-        self.data = None
-        self.daily_returns = None
-        self.results = {} # Stockera les courbes de prix
-        self.metrics = {} # Stockera les performances (Sharpe, etc.)
-        self.best_params = {} # Pour savoir quels paramètres ont gagné
+        self.data = pd.DataFrame()
+        self.daily_returns = pd.Series(dtype=float)
+        self.best_params = {} # Pour stocker les recommandations
 
     def load_data(self):
-        """Télécharge et prépare les données."""
+        """Télécharge les données."""
         try:
             df = yf.download(self.ticker, start=self.start_date, end=self.end_date, progress=False)
-            if df.empty:
-                return False
-            
-            # Gestion des formats multi-index de yfinance récents
             if isinstance(df.columns, pd.MultiIndex):
                 df = df.xs('Close', axis=1, level=0, drop_level=False)
                 df.columns = ['Close']
             else:
                 df = df[['Close']]
 
+            if df.empty: return False
+
             self.data = df
             self.daily_returns = self.data['Close'].pct_change().fillna(0)
-            
-            # Stratégie de base : Buy & Hold
-            bh_curve = (1 + self.daily_returns).cumprod() * self.initial_investment
-            self.results['Buy_and_Hold'] = bh_curve
-            self.metrics['Buy_and_Hold'] = self._calculate_metrics(self.daily_returns)
             return True
         except Exception as e:
-            st.error(f"Erreur data {self.ticker}: {e}")
+            st.error(f"Erreur chargement : {e}")
             return False
 
-    def _calculate_metrics(self, returns_series):
-        """Calcule Sharpe, Drawdown et Perf Totale."""
-        # NETTOYAGE : On enlève les lignes vides (le dernier jour souvent NaN à cause du shift)
-        returns_series = returns_series.dropna()
-        
-        if returns_series.empty:
-            return {'Sharpe': 0, 'Max Drawdown': 0, 'Total Perf': 0}
+    def compute_metrics(self, strategy_returns):
+        """Calcule Sharpe, Max Drawdown et Performance Totale."""
+        strategy_returns = strategy_returns.dropna()
+        if strategy_returns.empty:
+            return {'Sharpe': 0.0, 'Max Drawdown': 0.0, 'Total Perf': 0.0}
 
-        # Sharpe
-        risk_free = 0.03
-        ann_factor = 252
-        mean_ret = returns_series.mean()
-        std_ret = returns_series.std()
+        rf = 0.03
+        mean_ret = strategy_returns.mean()
+        std_ret = strategy_returns.std()
         
-        if std_ret == 0: 
-            sharpe = 0
-        else: 
-            daily_rf = (1 + risk_free)**(1/ann_factor) - 1
-            sharpe = (mean_ret - daily_rf) / std_ret * np.sqrt(ann_factor)
-        
-        # Drawdown & Perf
-        cum_ret = (1 + returns_series).cumprod()
+        if std_ret == 0: sharpe = 0
+        else: sharpe = (mean_ret - (rf/252)) / std_ret * np.sqrt(252)
+
+        cum_ret = (1 + strategy_returns).cumprod()
         peak = cum_ret.expanding(min_periods=1).max()
         dd = (cum_ret - peak) / peak
         max_dd = abs(dd.min())
-
-        # Correction ici : on prend la dernière valeur valide
         total_perf = cum_ret.iloc[-1] - 1
 
-        return {'Sharpe': sharpe, 'Max Drawdown': max_dd, 'Total Perf': total_perf}
-    # --- MOTEUR D'OPTIMISATION ---
-    
-    def optimize_momentum(self):
-        """Teste plusieurs fenêtres et garde la meilleure."""
-        best_sharpe = -np.inf
-        best_window = 20
-        best_curve = None
-        best_rets = None
+        return {
+            'Sharpe': round(sharpe, 2),
+            'Max Drawdown': f"{max_dd:.2%}",
+            'Total Perf': f"{total_perf:.2%}",
+            'Raw_Sharpe': sharpe # Pour le tri interne
+        }
 
-        # Plage de recherche : de 10 à 100 par pas de 5
-        windows = range(10, 105, 5)
+    def run_strategy(self, strat_name, **params):
+        """Exécute une stratégie spécifique avec des paramètres donnés."""
+        bh_curve = (1 + self.daily_returns).cumprod() * self.initial_investment
+        signals = pd.Series(0, index=self.data.index)
+
+        # --- LOGIQUE DES STRATÉGIES ---
+        if strat_name == "Momentum":
+            window = int(params.get('window', 50))
+            mms = self.data['Close'].rolling(window=window).mean()
+            signals = np.where(self.data['Close'] > mms, 1.0, 0.0)
+            
+        elif strat_name == "Cross MMS":
+            short_w = int(params.get('short_w', 20))
+            long_w = int(params.get('long_w', 50))
+            mms_short = self.data['Close'].rolling(window=short_w).mean()
+            mms_long = self.data['Close'].rolling(window=long_w).mean()
+            signals = np.where(mms_short > mms_long, 1.0, 0.0)
+
+        elif strat_name == "Mean Reversion (BB)":
+            window = int(params.get('window', 20))
+            std_dev = float(params.get('std_dev', 2.0))
+            sma = self.data['Close'].rolling(window=window).mean()
+            std = self.data['Close'].rolling(window=window).std()
+            lower_band = sma - (std * std_dev)
+            # Achat si < Lower Band, Vente si > SMA (simplifié)
+            signals = np.where(self.data['Close'] < lower_band, 1.0, 0.0)
+
+        # Backtest
+        signals = pd.Series(signals, index=self.data.index)
+        strat_returns = self.daily_returns.shift(-1) * signals.shift(1).fillna(0)
+        strat_curve = (1 + strat_returns).cumprod() * self.initial_investment
+        strat_curve = strat_curve.ffill() # Correction du bug NaN à la fin
+
+        return strat_curve, strat_returns
+
+    # --- PARTIE OPTIMISATION (LE CERVEAU) ---
+    def find_best_params(self):
+        """Teste plein de combinaisons et stocke les gagnantes."""
         
-        for w in windows:
-            mms = self.data['Close'].rolling(window=w).mean()
-            signal = np.where(self.data['Close'] > mms, 1.0, 0.0)
-            # Shift(1) pour éviter le look-ahead bias
-            strat_ret = self.daily_returns.shift(-1) * pd.Series(signal, index=self.data.index).shift(1).fillna(0)
-            
-            metrics = self._calculate_metrics(strat_ret)
-            if metrics['Sharpe'] > best_sharpe:
-                best_sharpe = metrics['Sharpe']
-                best_window = w
-                best_rets = strat_ret
-                best_curve = (1 + strat_ret).cumprod() * self.initial_investment
+        # 1. Optimisation Momentum
+        best_sharpe = -999
+        best_p = {'window': 50}
+        for w in range(10, 100, 10):
+            _, rets = self.run_strategy("Momentum", window=w)
+            m = self.compute_metrics(rets)
+            if m['Raw_Sharpe'] > best_sharpe:
+                best_sharpe = m['Raw_Sharpe']
+                best_p = {'window': w}
+        self.best_params['Momentum'] = best_p
 
-        name = f"Mom_Best({best_window}d)"
-        self.results[name] = best_curve
-        self.metrics[name] = self._calculate_metrics(best_rets)
-        self.best_params['Momentum'] = f"Window: {best_window}"
-
-    def optimize_cross_mms(self):
-        """Teste croisements MMS Court/Long."""
-        best_sharpe = -np.inf
-        best_params = (10, 50)
-        best_curve = None
-        best_rets = None
-
-        short_windows = range(5, 30, 5)
-        long_windows = range(40, 100, 10)
-
-        for s, l in itertools.product(short_windows, long_windows):
+        # 2. Optimisation Cross MMS
+        best_sharpe = -999
+        best_p = {'short_w': 20, 'long_w': 50}
+        for s, l in itertools.product(range(10, 50, 10), range(50, 150, 20)):
             if s >= l: continue
-            
-            mms_s = self.data['Close'].rolling(window=s).mean()
-            mms_l = self.data['Close'].rolling(window=l).mean()
-            signal = np.where(mms_s > mms_l, 1.0, 0.0)
-            strat_ret = self.daily_returns.shift(-1) * pd.Series(signal, index=self.data.index).shift(1).fillna(0)
+            _, rets = self.run_strategy("Cross MMS", short_w=s, long_w=l)
+            m = self.compute_metrics(rets)
+            if m['Raw_Sharpe'] > best_sharpe:
+                best_sharpe = m['Raw_Sharpe']
+                best_p = {'short_w': s, 'long_w': l}
+        self.best_params['Cross MMS'] = best_p
 
-            metrics = self._calculate_metrics(strat_ret)
-            if metrics['Sharpe'] > best_sharpe:
-                best_sharpe = metrics['Sharpe']
-                best_params = (s, l)
-                best_rets = strat_ret
-                best_curve = (1 + strat_ret).cumprod() * self.initial_investment
+        # 3. Optimisation BB
+        best_sharpe = -999
+        best_p = {'window': 20, 'std_dev': 2.0}
+        for w, std in itertools.product(range(10, 50, 10), [1.5, 2.0, 2.5]):
+            _, rets = self.run_strategy("Mean Reversion (BB)", window=w, std_dev=std)
+            m = self.compute_metrics(rets)
+            if m['Raw_Sharpe'] > best_sharpe:
+                best_sharpe = m['Raw_Sharpe']
+                best_p = {'window': w, 'std_dev': std}
+        self.best_params['Mean Reversion (BB)'] = best_p
 
-        name = f"Cross_Best({best_params[0]}/{best_params[1]})"
-        self.results[name] = best_curve
-        self.metrics[name] = self._calculate_metrics(best_rets)
-        self.best_params['Cross MMS'] = f"Short: {best_params[0]}, Long: {best_params[1]}"
-
-    def optimize_bollinger(self):
-        """Teste Bollinger (Mean Reversion)."""
-        best_sharpe = -np.inf
-        best_params = (20, 2.0)
-        best_curve = None
-        best_rets = None
-
-        windows = range(10, 50, 5)
-        stds = [1.5, 2.0, 2.5]
-
-        for w, n in itertools.product(windows, stds):
-            mid = self.data['Close'].rolling(window=w).mean()
-            std = self.data['Close'].rolling(window=w).std()
-            lower = mid - (std * n)
-            
-            # Signal : Achat si prix < lower, Vente si prix > mid
-            signal = np.where(self.data['Close'] < lower, 1.0, 0.0)
-            position = pd.Series(signal, index=self.data.index).replace(0, np.nan) # Astuce pour ffill
-            
-            # On sort quand on touche la moyenne (simplification vectorielle)
-            # Pour être précis vectoriellement sans boucle, c'est complexe. 
-            # Ici on garde une logique simple : 1 si < lower, 0 sinon (approche pure signal, moins "position holding")
-            # Pour l'optimisation rapide, on va considérer : Long si Close < Lower, Exit si Close > Mid
-            # Approximation vectorielle :
-            sig_entry = (self.data['Close'] < lower)
-            sig_exit = (self.data['Close'] > mid)
-            
-            # Logique de position stateful (un peu lent mais nécessaire pour Bollinger)
-            pos = 0
-            pos_arr = []
-            for i in range(len(self.data)):
-                if sig_entry.iloc[i]: pos = 1
-                elif sig_exit.iloc[i]: pos = 0
-                pos_arr.append(pos)
-            
-            position_final = pd.Series(pos_arr, index=self.data.index)
-            
-            strat_ret = self.daily_returns.shift(-1) * position_final.shift(1).fillna(0)
-            
-            metrics = self._calculate_metrics(strat_ret)
-            if metrics['Sharpe'] > best_sharpe:
-                best_sharpe = metrics['Sharpe']
-                best_params = (w, n)
-                best_rets = strat_ret
-                best_curve = (1 + strat_ret).cumprod() * self.initial_investment
-
-        name = f"BB_Best({best_params[0]}d/{best_params[1]}std)"
-        self.results[name] = best_curve
-        self.metrics[name] = self._calculate_metrics(best_rets)
-        self.best_params['Bollinger'] = f"Win: {best_params[0]}, Std: {best_params[1]}"
-
-    def run_all_optimizations(self):
-        self.optimize_momentum()
-        self.optimize_cross_mms()
-        self.optimize_bollinger()
-
-    def get_results_df(self):
-        return pd.DataFrame(self.results)
+    def predict_future(self, days_ahead=30):
+        """Régression linéaire pour prédiction."""
+        df_pred = self.data.copy().reset_index()
+        df_pred['Date_Ordinal'] = df_pred['Date'].map(pd.Timestamp.toordinal)
+        X = df_pred[['Date_Ordinal']].values
+        y = df_pred['Close'].values
+        model = LinearRegression().fit(X, y)
+        
+        last_date = df_pred['Date'].iloc[-1]
+        future_dates = [last_date + timedelta(days=i) for i in range(1, days_ahead + 1)]
+        future_ordinals = [[d.toordinal()] for d in future_dates]
+        predictions = model.predict(future_ordinals)
+        
+        residuals = y - model.predict(X)
+        std_resid = np.std(residuals)
+        return future_dates, predictions, std_resid
 
 # --- 2. INTERFACE STREAMLIT ---
 
-st.set_page_config(layout="wide", page_title="Auto-Quant Optimizer")
-st.title("⚡ Auto-Quant: Optimisation Automatique")
-st.markdown("Ce système teste automatiquement des centaines de combinaisons pour trouver les paramètres optimaux (Max Sharpe) sur la période donnée.")
+st.set_page_config(layout="wide", page_title="Smart Quant Lab")
+st.title("🧠 Smart Quant Lab: Analyse & Optimisation")
+
+# Initialisation session state pour ne pas perdre les calculs
+if 'analyzer' not in st.session_state:
+    st.session_state.analyzer = None
 
 with st.sidebar:
-    st.header("Configuration")
-    ticker_input = st.text_input("Ticker (Yahoo Finance)", value="BTC-USD")
-    start_date = st.date_input("Début", pd.to_datetime("2020-01-01"))
-    end_date = st.date_input("Fin", date.today())
+    st.header("1. Paramètres Généraux")
+    ticker = st.text_input("Ticker", "BTC-USD")
+    s_date = st.date_input("Début", date(2020, 1, 1))
+    e_date = st.date_input("Fin", date.today())
+    
+    if st.button("📥 Charger Données & Scanner"):
+        an = SingleAssetAnalyzer(ticker, s_date, e_date)
+        if an.load_data():
+            with st.spinner("Le robot cherche les meilleurs paramètres..."):
+                an.find_best_params() # On lance l'optimisation ici
+            st.session_state.analyzer = an
+            st.success("Scan terminé !")
     
     st.markdown("---")
-    st.info("Plus besoin de sélectionner les plages. L'algo va chercher les meilleurs paramètres tout seul.")
     
-    run_btn = st.button("Lancer l'Optimisation & Backtest")
-
-if run_btn:
-    with st.spinner(f'Optimisation des stratégies pour {ticker_input}...'):
-        # Création de l'objet (C'est ici que la POO aide pour le futur portefeuille)
-        asset = AssetAnalyzer(ticker_input, start_date, end_date)
+    # On affiche les contrôles seulement si l'analyseur est chargé
+    #ici, on fait que le contrôle manuel
+    if st.session_state.analyzer:
+        an = st.session_state.analyzer
         
-        if asset.load_data():
-            # Lancement des recherches
-            asset.run_all_optimizations()
+        st.header("2. Contrôle Manuel")
+        strat_choice = st.selectbox("Stratégie Active", ["Momentum", "Cross MMS", "Mean Reversion (BB)"])
+        
+        current_params = {}
+        
+        # AFFICHAGE INTELLIGENT : On montre les sliders MAIS aussi les valeurs recommandées
+        if strat_choice == "Momentum":
+            rec = an.best_params['Momentum']['window']
+            st.info(f"💡 Suggestion IA : Fenêtre = {rec}")
+            current_params['window'] = st.slider("Fenêtre", 10, 200, 50)
             
-            # Récupération des résultats
-            df_results = asset.get_results_df()
-            metrics_dict = asset.metrics
-            best_params = asset.best_params
+        elif strat_choice == "Cross MMS":
+            rec_s = an.best_params['Cross MMS']['short_w']
+            rec_l = an.best_params['Cross MMS']['long_w']
+            st.info(f"💡 Suggestion IA : Court={rec_s}, Long={rec_l}")
+            current_params['short_w'] = st.slider("Moyenne Courte", 5, 50, 20)
+            current_params['long_w'] = st.slider("Moyenne Longue", 50, 200, 100)
+            
+        elif strat_choice == "Mean Reversion (BB)":
+            rec_w = an.best_params['Mean Reversion (BB)']['window']
+            rec_std = an.best_params['Mean Reversion (BB)']['std_dev']
+            st.info(f"💡 Suggestion IA : Fenêtre={rec_w}, Std={rec_std}")
+            current_params['window'] = st.slider("Fenêtre BB", 10, 100, 20)
+            current_params['std_dev'] = st.slider("Écart-Type", 1.0, 3.0, 2.0)
 
-            # --- AFFICHAGE ---
-            
-            # 1. Paramètres Gagnants
-            st.subheader("🏆 Paramètres Optimaux Découverts")
-            c1, c2, c3 = st.columns(3)
-            c1.success(f"**Momentum**\n\n{best_params.get('Momentum')}")
-            c2.success(f"**Cross MMS**\n\n{best_params.get('Cross MMS')}")
-            c3.success(f"**Bollinger**\n\n{best_params.get('Bollinger')}")
+        st.markdown("---")
+        st.header("3. Options")
+        show_pred = st.checkbox("Voir Prédiction (ML)")
 
-            # 2. Graphique
-            st.subheader("Performance Comparée (Base 100)")
-            st.line_chart(df_results)
+# --- AFFICHAGE PRINCIPAL ---
 
-            # 3. Tableau Métriques
-            st.subheader("Détails de Performance")
-            metrics_df = pd.DataFrame(metrics_dict).T
-            metrics_df = metrics_df.sort_values(by="Sharpe", ascending=False)
-            
-            # Formatage
-            st.dataframe(metrics_df.style.format({
-                'Sharpe': '{:.2f}',
-                'Max Drawdown': '{:.2%}',
-                'Total Perf': '{:.2%}'
-            }))
-            
-        else:
-            st.error("Impossible de récupérer les données.")
+if st.session_state.analyzer:
+    an = st.session_state.analyzer
+    
+    # 1. CALCULS (Stratégie Manuelle Choisie)
+    strat_curve, strat_rets = an.run_strategy(strat_choice, **current_params)
+    bh_curve = (1 + an.daily_returns).cumprod() * an.initial_investment
+    
+    met_strat = an.compute_metrics(strat_rets)
+    met_bh = an.compute_metrics(an.daily_returns)
+
+    # 2. KPI (Haut de page)
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Stratégie", strat_choice)
+    c2.metric("Sharpe Ratio", met_strat['Sharpe'], delta=f"{met_strat['Sharpe'] - met_bh['Sharpe']:.2f} vs B&H")
+    c3.metric("Max Drawdown", met_strat['Max Drawdown'])
+    c4.metric("Gain Total", met_strat['Total Perf'])
+
+    # 3. GRAPHIQUE : MANUEL vs BUY & HOLD
+    st.subheader("📈 Analyse Détaillée : Manuel vs Marché")
+    df_chart = pd.DataFrame({
+        "Buy & Hold (Marché)": bh_curve,
+        f"Ma Stratégie ({strat_choice})": strat_curve
+    })
+    st.line_chart(df_chart, color=["#FF4B4B", "#0068C9"])
+
+    # 4. SECTION COMPARATIVE (Le "Battle" des stratégies optimisées)
+    st.markdown("---")
+    st.subheader("⚔️ Battle Royale : Comparaison des Modèles Optimisés")
+    st.caption("Voici ce que ça donnerait si on prenait les MEILLEURS paramètres pour chaque stratégie sur cette période.")
+
+    # On recalcule les courbes optimales pour les afficher
+    curve_mom, _ = an.run_strategy("Momentum", **an.best_params['Momentum'])
+    curve_cross, _ = an.run_strategy("Cross MMS", **an.best_params['Cross MMS'])
+    curve_bb, _ = an.run_strategy("Mean Reversion (BB)", **an.best_params['Mean Reversion (BB)'])
+
+    df_battle = pd.DataFrame({
+        "Buy & Hold": bh_curve,
+        f"Momentum (Opti: {an.best_params['Momentum']['window']})": curve_mom,
+        f"Cross MMS (Opti)": curve_cross,
+        f"Bollinger (Opti)": curve_bb
+    })
+    st.line_chart(df_battle)
+
+    # 5. BONUS PRÉDICTION
+    if show_pred:
+        st.markdown("---")
+        st.subheader("🔮 Boule de Cristal (Prédiction)")
+        fut_d, fut_p, std = an.predict_future(30)
+        
+        recent = an.data['Close'].tail(100)
+        df_fut = pd.DataFrame({"Pred": fut_p, "High": fut_p+1.96*std, "Low": fut_p-1.96*std}, index=fut_d)
+        
+        import matplotlib.pyplot as plt
+        fig, ax = plt.subplots(figsize=(10, 4))
+        ax.plot(recent.index, recent.values, label="Historique", color="black")
+        ax.plot(df_fut.index, df_fut["Pred"], label="Prédiction", color="blue", linestyle="--")
+        ax.fill_between(df_fut.index, df_fut["Low"], df_fut["High"], color="blue", alpha=0.1)
+        ax.legend()
+        st.pyplot(fig)
+
+else:
+    st.info("👈 Veuillez cliquer sur 'Charger Données & Scanner' dans la barre latérale pour commencer.")
