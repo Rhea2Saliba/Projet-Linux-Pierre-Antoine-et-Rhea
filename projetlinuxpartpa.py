@@ -284,8 +284,18 @@ with st.sidebar:
             manual_params['bb_window'] = st.slider("Fenêtre BB", 10, 100, 20, key="bb_w_slider")
             manual_params['bb_std'] = st.slider("Écart-Type", 1.0, 3.0, 2.0, key="bb_std_slider")
         st.markdown("---")
-        st.header("3. Options")
-        show_pred = st.checkbox("Voir Prédiction (ML)")
+
+
+        st.header("3. Prédiction (Bonus)")
+        show_pred = st.checkbox("Activer le Futur 🔮")
+        
+        # --- AJOUT : MENU DÉROULANT POUR CHOISIR LE MODÈLE ---
+        if show_pred:
+            model_choice = st.selectbox(
+                "Choisir le Modèle", 
+                ["Linear Regression", "ARIMA", "Machine Learning (RF)"]
+            )
+            forecast_days = st.slider("Jours à prédire", 7, 90, 30)
 
 # --- AFFICHAGE PRINCIPAL ---
 
@@ -364,22 +374,59 @@ if st.session_state.analyzer:
     })
     st.line_chart(df_battle)
 
-    # 5. BONUS PRÉDICTION
+    # B. SECTION PRÉDICTION
     if show_pred:
         st.markdown("---")
-        st.subheader("🔮 Boule de Cristal (Prédiction)")
-        fut_d, fut_p, std = an.predict_future(30)
+        st.subheader(f"🔮 Prédiction Future : {model_choice}")
         
-        recent = an.data['Close'].tail(100)
-        df_fut = pd.DataFrame({"Pred": fut_p, "High": fut_p+1.96*std, "Low": fut_p-1.96*std}, index=fut_d)
+        # Appel de la nouvelle fonction avec le paramètre 'model_choice'
+        with st.spinner(f"Calcul du modèle {model_choice} en cours..."):
+            fut_d, fut_p, std = an.predict_future(forecast_days, model_type=model_choice)
         
+        # Préparation des données pour le graph
+        recent = an.data['Close'].tail(180) # On montre les 6 derniers mois d'historique
+        df_fut = pd.DataFrame({"Pred": fut_p}, index=fut_d)
+        
+        # Intervalle de confiance (95% = 1.96 * écart-type)
+        df_fut["High"] = df_fut["Pred"] + (1.96 * std)
+        df_fut["Low"] = df_fut["Pred"] - (1.96 * std)
+
+        # Graphique Matplotlib
         import matplotlib.pyplot as plt
-        fig, ax = plt.subplots(figsize=(10, 4))
-        ax.plot(recent.index, recent.values, label="Historique", color="black")
-        ax.plot(df_fut.index, df_fut["Pred"], label="Prédiction", color="blue", linestyle="--")
-        ax.fill_between(df_fut.index, df_fut["Low"], df_fut["High"], color="blue", alpha=0.1)
+        fig, ax = plt.subplots(figsize=(12, 5))
+        
+        ax.plot(recent.index, recent.values, label="Historique Récent", color="black", alpha=0.6)
+        ax.plot(df_fut.index, df_fut["Pred"], label=f"Prédiction ({model_choice})", color="#0068C9", linestyle="--", linewidth=2)
+        ax.fill_between(df_fut.index, df_fut["Low"], df_fut["High"], color="#0068C9", alpha=0.15, label="Zone de Confiance 95%")
+        
+        ax.set_title(f"Projection {ticker} sur {forecast_days} jours")
         ax.legend()
+        ax.grid(True, alpha=0.2)
+        
         st.pyplot(fig)
+        
+        # Petit texte explicatif selon le modèle choisi
+        if model_choice == "ARIMA":
+            st.info("ℹ️ **ARIMA** analyse les cycles passés. Idéal pour les marchés volatils à court terme.")
+        elif model_choice == "Machine Learning (RF)":
+            st.info("ℹ️ **Random Forest** utilise l'IA pour repérer des motifs complexes (prix d'hier, avant-hier, moyennes).")
+        else:
+            st.warning("⚠️ **Régression Linéaire** : Trace juste une tendance droite. Attention, ne prédit pas les chutes !")
+
+        ticker_clean = ticker.upper()
+        #ajout du retour sur experience
+        # CAS 1 : BITCOIN + ARIMA
+        if "BTC" in ticker_clean and model_choice == "ARIMA":
+            st.success("✅ Excellent choix ! Le Bitcoin est très volatil et cyclique, ARIMA est théoriquement le meilleur modèle pour capturer ces mouvements.")
+
+        # CAS 2 : AIR LIQUIDE + REGRESSION LINEAIRE
+        # (Le ticker Air Liquide sur Yahoo est souvent AI.PA)
+        elif ("AI.PA" in ticker_clean or "AIR LIQUIDE" in ticker_clean) and model_choice == "Linear Regression":
+            st.success("✅ Bien vu ! Air Liquide est une action très stable avec une tendance long terme claire. La Régression Linéaire suffit largement et sera très propre.")
+        
+        # CAS 3 : LE RESTE (Optionnel, petit message informatif)
+        else:
+            st.info(f"Information : Vous utilisez {model_choice} sur {ticker}. C'est une approche intéressante à comparer.")
 
 else:
     st.info("👈 Veuillez cliquer sur 'Charger Données & Scanner' dans la barre latérale pour commencer.")
