@@ -150,23 +150,39 @@ class SingleAssetAnalyzer:
         last_date = df.index[-1]
         future_dates = [last_date + timedelta(days=i) for i in range(1, days_ahead + 1)]
         
-        # --- MODÈLE 1 : RÉGRESSION LINÉAIRE ---
+        # --- MODÈLE 1 : RÉGRESSION LINÉAIRE (CORRIGÉ AVEC ANCRAGE) ---
         if model_type == "Linear Regression":
             df = df.reset_index()
             df['Date_Ordinal'] = df['Date'].map(pd.Timestamp.toordinal)
             X = df[['Date_Ordinal']].values
             y = df['Close'].values
             
+            # Entrainement sur tout l'historique pour avoir la PENTE (la direction)
             model = LinearRegression().fit(X, y)
             
             future_ordinals = [[d.toordinal()] for d in future_dates]
             preds = model.predict(future_ordinals)
             
-            # Ecart-type des erreurs passées pour l'intervalle de confiance
+            # --- LE FIX MAGIQUE EST ICI ---
+            # 1. On demande au modèle : "Selon toi, à combien on devrait être aujourd'hui ?"
+            last_day_ordinal = [[X[-1][0]]]
+            theoretical_price_today = model.predict(last_day_ordinal)[0]
+            
+            # 2. On regarde le vrai prix : "En réalité, on est à combien ?"
+            actual_price_today = y[-1]
+            
+            # 3. On calcule l'écart (le gap)
+            offset = actual_price_today - theoretical_price_today
+            
+            # 4. On décale toute la prédiction future pour recoller les morceaux
+            preds = preds + offset
+            # -----------------------------
+            
+            # Calcul de l'écart-type pour la zone de confiance
             residuals = y - model.predict(X)
             std_dev = np.std(residuals)
+            
             return future_dates, preds, std_dev
-
         # --- MODÈLE 2 : ARIMA (AutoRegressive Integrated Moving Average) ---
         elif model_type == "ARIMA":
             # On utilise (5,1,0) : regarde les 5 derniers jours, différencie 1 fois
