@@ -3,219 +3,252 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 from datetime import date
+import itertools
 
-# --- 1. FONCTIONS DE PERFORMANCE ---
+# --- 1. CLASSE D'ANALYSE D'ACTIF (Le coeur du système) ---
 
-def calculate_max_drawdown(cumulative_returns):
-    peak = cumulative_returns.expanding(min_periods=1).max()
-    drawdown = (cumulative_returns - peak) / peak
-    return abs(drawdown.min()) 
+class AssetAnalyzer:
+    def __init__(self, ticker, start_date, end_date, initial_investment=100):
+        self.ticker = ticker
+        self.start_date = start_date
+        self.end_date = end_date
+        self.initial_investment = initial_investment
+        self.data = None
+        self.daily_returns = None
+        self.results = {} # Stockera les courbes de prix
+        self.metrics = {} # Stockera les performances (Sharpe, etc.)
+        self.best_params = {} # Pour savoir quels paramètres ont gagné
 
-def calculate_sharpe_ratio(daily_returns, risk_free_rate=0.03, annualization_factor=252):
-    daily_returns = daily_returns[daily_returns != 0].dropna()
-    mean_return = daily_returns.mean()
-    std_dev_return = daily_returns.std()
-    daily_risk_free_rate = (1 + risk_free_rate)**(1/annualization_factor) - 1
-    sharpe_ratio = (mean_return - daily_risk_free_rate) / std_dev_return * np.sqrt(annualization_factor)
-    return sharpe_ratio
+    def load_data(self):
+        """Télécharge et prépare les données."""
+        try:
+            df = yf.download(self.ticker, start=self.start_date, end=self.end_date, progress=False)
+            if df.empty:
+                return False
+            
+            # Gestion des formats multi-index de yfinance récents
+            if isinstance(df.columns, pd.MultiIndex):
+                df = df.xs('Close', axis=1, level=0, drop_level=False)
+                df.columns = ['Close']
+            else:
+                df = df[['Close']]
 
-# --- 2. FONCTION PRINCIPALE DE L'APPLICATION (Mise en cache) ---
+            self.data = df
+            self.daily_returns = self.data['Close'].pct_change().fillna(0)
+            
+            # Stratégie de base : Buy & Hold
+            bh_curve = (1 + self.daily_returns).cumprod() * self.initial_investment
+            self.results['Buy_and_Hold'] = bh_curve
+            self.metrics['Buy_and_Hold'] = self._calculate_metrics(self.daily_returns)
+            return True
+        except Exception as e:
+            st.error(f"Erreur data {self.ticker}: {e}")
+            return False
 
-# st.cache_data est utilisé pour que Streamlit n'exécute pas tout le calcul à chaque interaction, 
-# seulement si les paramètres d'entrée changent.
-@st.cache_data
-def load_and_backtest(ticker, start_date, end_date, mom_window, short_w, long_w, bb_window, n_std_dev):
-    """ Récupère les données et exécute le backtesting pour les quatre stratégies. """
-    
-    initial_investment = 100
-    
-    try:
-        data = yf.download(ticker, start=start_date, end=end_date)
-        asset_prices = data[['Close']].copy()
-        asset_prices.columns = [ticker]
-    except Exception as e:
-        st.error(f"Erreur de chargement des données pour {ticker} : {e}")
-        return None, None
-    
-    # ------------------ PRÉPARATION DES DONNÉES DE BASE ------------------
-    daily_returns = asset_prices[ticker].pct_change().fillna(0)
-    
-    # Normalisation du prix brut pour la comparaison (Raw Price Value)
-    normalized_price = (asset_prices[ticker] / asset_prices[ticker].iloc[0]) * initial_investment
-    normalized_price.name = 'Raw_Price_Value'
-    
-    final_df = normalized_price.to_frame() # Initialiser le DataFrame pour le graphique
-    metrics = {}
+    def _calculate_metrics(self, returns_series):
+        """Calcule Sharpe, Drawdown et Perf Totale."""
+        # NETTOYAGE : On enlève les lignes vides (le dernier jour souvent NaN à cause du shift)
+        returns_series = returns_series.dropna()
+        
+        if returns_series.empty:
+            return {'Sharpe': 0, 'Max Drawdown': 0, 'Total Perf': 0}
 
-    # ------------------ STRATÉGIE 1: BUY-AND-HOLD ------------------
-    cumulative_value_bh = (1 + daily_returns).cumprod() * initial_investment
-    cumulative_value_bh.name = 'Buy_and_Hold'
-    final_df = pd.concat([final_df, cumulative_value_bh], axis=1)
-    
-    metrics['Buy-and-Hold'] = {
-        'Sharpe': calculate_sharpe_ratio(daily_returns),
-        'Max Drawdown': calculate_max_drawdown(cumulative_value_bh),
-        'Performance Totale': (cumulative_value_bh.iloc[-1] / initial_investment) - 1
-    }
+        # Sharpe
+        risk_free = 0.03
+        ann_factor = 252
+        mean_ret = returns_series.mean()
+        std_ret = returns_series.std()
+        
+        if std_ret == 0: 
+            sharpe = 0
+        else: 
+            daily_rf = (1 + risk_free)**(1/ann_factor) - 1
+            sharpe = (mean_ret - daily_rf) / std_ret * np.sqrt(ann_factor)
+        
+        # Drawdown & Perf
+        cum_ret = (1 + returns_series).cumprod()
+        peak = cum_ret.expanding(min_periods=1).max()
+        dd = (cum_ret - peak) / peak
+        max_dd = abs(dd.min())
 
-    # ------------------ STRATÉGIE 2: MOMENTUM (MMS Simple) ------------------
-    asset_prices.loc[:, 'MMS'] = asset_prices[ticker].rolling(window=mom_window).mean()
-    asset_prices.loc[:, 'Signal_Mom'] = np.where(asset_prices[ticker] > asset_prices['MMS'], 1.0, 0.0)
-    strategy_returns_mom = daily_returns.shift(-1) * asset_prices['Signal_Mom'].shift(1).fillna(0)
-    cumulative_value_mom = (1 + strategy_returns_mom).cumprod() * initial_investment
-    
-    strategy_name_mom = f'Momentum_{mom_window}D'
-    cumulative_value_mom.name = strategy_name_mom
-    final_df[strategy_name_mom] = cumulative_value_mom
-    
-    metrics[strategy_name_mom] = {
-        'Sharpe': calculate_sharpe_ratio(strategy_returns_mom),
-        'Max Drawdown': calculate_max_drawdown(cumulative_value_mom),
-        'Performance Totale': (cumulative_value_mom.iloc[-1] / initial_investment) - 1
-    }
+        # Correction ici : on prend la dernière valeur valide
+        total_perf = cum_ret.iloc[-1] - 1
 
-    # ------------------ STRATÉGIE 3: CROISEMENT MMS ------------------
-    asset_prices.loc[:, 'MMS_Short'] = asset_prices[ticker].rolling(window=short_w).mean()
-    asset_prices.loc[:, 'MMS_Long'] = asset_prices[ticker].rolling(window=long_w).mean()
-    asset_prices.loc[:, 'Signal_Cross'] = np.where(asset_prices['MMS_Short'] > asset_prices['MMS_Long'], 1.0, 0.0)
-    strategy_returns_cross = daily_returns.shift(-1) * asset_prices['Signal_Cross'].shift(1).fillna(0)
-    cumulative_value_cross = (1 + strategy_returns_cross).cumprod() * initial_investment
+        return {'Sharpe': sharpe, 'Max Drawdown': max_dd, 'Total Perf': total_perf}
+    # --- MOTEUR D'OPTIMISATION ---
     
-    strategy_name_cross = f'Cross_{short_w}_{long_w}D'
-    cumulative_value_cross.name = strategy_name_cross
-    final_df[strategy_name_cross] = cumulative_value_cross
-    
-    metrics[strategy_name_cross] = {
-        'Sharpe': calculate_sharpe_ratio(strategy_returns_cross),
-        'Max Drawdown': calculate_max_drawdown(cumulative_value_cross),
-        'Performance Totale': (cumulative_value_cross.iloc[-1] / initial_investment) - 1
-    }
+    def optimize_momentum(self):
+        """Teste plusieurs fenêtres et garde la meilleure."""
+        best_sharpe = -np.inf
+        best_window = 20
+        best_curve = None
+        best_rets = None
 
-    # ------------------ STRATÉGIE 4: BANDES DE BOLLINGER (Mean Reversion) ------------------
-    asset_prices.loc[:, 'BB_Mid'] = asset_prices[ticker].rolling(window=bb_window).mean()
-    asset_prices.loc[:, 'BB_Std'] = asset_prices[ticker].rolling(window=bb_window).std()
-    asset_prices.loc[:, 'BB_Lower'] = asset_prices['BB_Mid'] - (asset_prices['BB_Std'] * n_std_dev)
-    
-    # Logique d'Entrée (Achat si sous la bande inférieure)
-    asset_prices.loc[:, 'Signal_BB'] = np.where(asset_prices[ticker] < asset_prices['BB_Lower'], 1.0, 0.0)
-    
-    # Logique de Sortie (Sortie si repasse au-dessus de la bande moyenne)
-    # Remplir les jours de '1.0' (position ouverte) jusqu'à ce que la sortie soit déclenchée.
-    asset_prices.loc[:, 'Position_BB'] = asset_prices['Signal_BB'].ffill().fillna(0)
-    asset_prices.loc[asset_prices[ticker] > asset_prices['BB_Mid'], 'Position_BB'] = 0.0
-    
-    strategy_returns_bb = daily_returns.shift(-1) * asset_prices['Position_BB'].shift(1).fillna(0)
-    cumulative_value_bb = (1 + strategy_returns_bb).cumprod() * initial_investment
-    
-    strategy_name_bb = f'BB_{bb_window}D_{n_std_dev}x'
-    cumulative_value_bb.name = strategy_name_bb
-    final_df[strategy_name_bb] = cumulative_value_bb
-    
-    metrics[strategy_name_bb] = {
-        'Sharpe': calculate_sharpe_ratio(strategy_returns_bb),
-        'Max Drawdown': calculate_max_drawdown(cumulative_value_bb),
-        'Performance Totale': (cumulative_value_bb.iloc[-1] / initial_investment) - 1
-    }
-    
-    # Renvoyer le DataFrame final et les métriques
-    return final_df, metrics
+        # Plage de recherche : de 10 à 100 par pas de 5
+        windows = range(10, 105, 5)
+        
+        for w in windows:
+            mms = self.data['Close'].rolling(window=w).mean()
+            signal = np.where(self.data['Close'] > mms, 1.0, 0.0)
+            # Shift(1) pour éviter le look-ahead bias
+            strat_ret = self.daily_returns.shift(-1) * pd.Series(signal, index=self.data.index).shift(1).fillna(0)
+            
+            metrics = self._calculate_metrics(strat_ret)
+            if metrics['Sharpe'] > best_sharpe:
+                best_sharpe = metrics['Sharpe']
+                best_window = w
+                best_rets = strat_ret
+                best_curve = (1 + strat_ret).cumprod() * self.initial_investment
 
+        name = f"Mom_Best({best_window}d)"
+        self.results[name] = best_curve
+        self.metrics[name] = self._calculate_metrics(best_rets)
+        self.best_params['Momentum'] = f"Window: {best_window}"
 
-# --- 3. MISE EN PAGE STREAMLIT ---
+    def optimize_cross_mms(self):
+        """Teste croisements MMS Court/Long."""
+        best_sharpe = -np.inf
+        best_params = (10, 50)
+        best_curve = None
+        best_rets = None
 
-st.set_page_config(layout="wide")
-st.title("🔬 Quant A: Analyse Univariée d'Actif Unique")
-st.markdown("Plateforme de backtesting pour évaluer les stratégies quantitatives sur un seul actif.")
+        short_windows = range(5, 30, 5)
+        long_windows = range(40, 100, 10)
 
-# --- BARRE LATÉRALE (Contrôles Interactifs) ---
+        for s, l in itertools.product(short_windows, long_windows):
+            if s >= l: continue
+            
+            mms_s = self.data['Close'].rolling(window=s).mean()
+            mms_l = self.data['Close'].rolling(window=l).mean()
+            signal = np.where(mms_s > mms_l, 1.0, 0.0)
+            strat_ret = self.daily_returns.shift(-1) * pd.Series(signal, index=self.data.index).shift(1).fillna(0)
+
+            metrics = self._calculate_metrics(strat_ret)
+            if metrics['Sharpe'] > best_sharpe:
+                best_sharpe = metrics['Sharpe']
+                best_params = (s, l)
+                best_rets = strat_ret
+                best_curve = (1 + strat_ret).cumprod() * self.initial_investment
+
+        name = f"Cross_Best({best_params[0]}/{best_params[1]})"
+        self.results[name] = best_curve
+        self.metrics[name] = self._calculate_metrics(best_rets)
+        self.best_params['Cross MMS'] = f"Short: {best_params[0]}, Long: {best_params[1]}"
+
+    def optimize_bollinger(self):
+        """Teste Bollinger (Mean Reversion)."""
+        best_sharpe = -np.inf
+        best_params = (20, 2.0)
+        best_curve = None
+        best_rets = None
+
+        windows = range(10, 50, 5)
+        stds = [1.5, 2.0, 2.5]
+
+        for w, n in itertools.product(windows, stds):
+            mid = self.data['Close'].rolling(window=w).mean()
+            std = self.data['Close'].rolling(window=w).std()
+            lower = mid - (std * n)
+            
+            # Signal : Achat si prix < lower, Vente si prix > mid
+            signal = np.where(self.data['Close'] < lower, 1.0, 0.0)
+            position = pd.Series(signal, index=self.data.index).replace(0, np.nan) # Astuce pour ffill
+            
+            # On sort quand on touche la moyenne (simplification vectorielle)
+            # Pour être précis vectoriellement sans boucle, c'est complexe. 
+            # Ici on garde une logique simple : 1 si < lower, 0 sinon (approche pure signal, moins "position holding")
+            # Pour l'optimisation rapide, on va considérer : Long si Close < Lower, Exit si Close > Mid
+            # Approximation vectorielle :
+            sig_entry = (self.data['Close'] < lower)
+            sig_exit = (self.data['Close'] > mid)
+            
+            # Logique de position stateful (un peu lent mais nécessaire pour Bollinger)
+            pos = 0
+            pos_arr = []
+            for i in range(len(self.data)):
+                if sig_entry.iloc[i]: pos = 1
+                elif sig_exit.iloc[i]: pos = 0
+                pos_arr.append(pos)
+            
+            position_final = pd.Series(pos_arr, index=self.data.index)
+            
+            strat_ret = self.daily_returns.shift(-1) * position_final.shift(1).fillna(0)
+            
+            metrics = self._calculate_metrics(strat_ret)
+            if metrics['Sharpe'] > best_sharpe:
+                best_sharpe = metrics['Sharpe']
+                best_params = (w, n)
+                best_rets = strat_ret
+                best_curve = (1 + strat_ret).cumprod() * self.initial_investment
+
+        name = f"BB_Best({best_params[0]}d/{best_params[1]}std)"
+        self.results[name] = best_curve
+        self.metrics[name] = self._calculate_metrics(best_rets)
+        self.best_params['Bollinger'] = f"Win: {best_params[0]}, Std: {best_params[1]}"
+
+    def run_all_optimizations(self):
+        self.optimize_momentum()
+        self.optimize_cross_mms()
+        self.optimize_bollinger()
+
+    def get_results_df(self):
+        return pd.DataFrame(self.results)
+
+# --- 2. INTERFACE STREAMLIT ---
+
+st.set_page_config(layout="wide", page_title="Auto-Quant Optimizer")
+st.title("⚡ Auto-Quant: Optimisation Automatique")
+st.markdown("Ce système teste automatiquement des centaines de combinaisons pour trouver les paramètres optimaux (Max Sharpe) sur la période donnée.")
+
 with st.sidebar:
-    st.header("⚙️ Paramètres de l'Analyse")
+    st.header("Configuration")
+    ticker_input = st.text_input("Ticker (Yahoo Finance)", value="BTC-USD")
+    start_date = st.date_input("Début", pd.to_datetime("2020-01-01"))
+    end_date = st.date_input("Fin", date.today())
     
-    # Sélecteur d'Actif
-    selected_ticker = st.selectbox(
-        "Sélectionner l'Actif", 
-        ['^GSPC', 'BTC-USD', 'EURUSD=X', 'GC=F'], 
-        index=1 # BTC-USD par défaut pour les résultats intéressants
-    )
-
-    # Période de backtesting
-    st.subheader("Période")
-    today = date.today()
-    start_date_input = st.date_input("Date de Début", pd.to_datetime('2020-01-01'))
-    end_date_input = st.date_input("Date de Fin", today)
-    
-    # Paramètres de la Stratégie (Momentum)
-    st.subheader("Momentum (MMS Simple)")
-    momentum_window = st.slider("Période MMS (jours)", 20, 100, 50, 10)
-    
-    # Paramètres de la Stratégie (Croisement MMS)
-    st.subheader("Croisement MMS")
-    short_window = st.slider("MMS Rapide (jours)", 5, 50, 20)
-    long_window = st.slider("MMS Lente (jours)", 50, 200, 100)
-    
-    # Paramètres de la Stratégie (Bollinger)
-    st.subheader("Bandes de Bollinger")
-    bb_window = st.slider("Période BB (jours)", 10, 50, 20)
-    n_std_dev = st.slider("Multiplicateur Écart-Type", 1.0, 3.0, 2.0, 0.1)
-
-    # Exécuter le backtesting
     st.markdown("---")
-    if st.button("Lancer l'Analyse & Backtesting"):
-        st.session_state.run_analysis = True
+    st.info("Plus besoin de sélectionner les plages. L'algo va chercher les meilleurs paramètres tout seul.")
     
-# ----------------------------------------------------------------------
+    run_btn = st.button("Lancer l'Optimisation & Backtest")
 
-# --- LOGIQUE D'AFFICHAGE DES RÉSULTATS ---
-if 'run_analysis' in st.session_state and st.session_state.run_analysis:
-    
-    st.info(f"Analyse en cours pour l'actif : **{selected_ticker}**")
-    
-    data_df, metrics_results = load_and_backtest(
-        selected_ticker, 
-        start_date_input.strftime('%Y-%m-%d'), 
-        end_date_input.strftime('%Y-%m-%d'), 
-        momentum_window, short_window, long_window, 
-        bb_window, n_std_dev
-    )
+if run_btn:
+    with st.spinner(f'Optimisation des stratégies pour {ticker_input}...'):
+        # Création de l'objet (C'est ici que la POO aide pour le futur portefeuille)
+        asset = AssetAnalyzer(ticker_input, start_date, end_date)
+        
+        if asset.load_data():
+            # Lancement des recherches
+            asset.run_all_optimizations()
+            
+            # Récupération des résultats
+            df_results = asset.get_results_df()
+            metrics_dict = asset.metrics
+            best_params = asset.best_params
 
-    if data_df is not None:
-        
-        # 1. GRAPHIQUE PRINCIPAL (avec sélection des stratégies à afficher)
-        st.header("Graphique des Performances Cumulées (Base 100)")
-        
-        strategies_to_plot = st.multiselect(
-            "Sélectionner les stratégies à afficher :", 
-            options=data_df.columns.tolist(),
-            default=data_df.columns.tolist() # Toutes affichées par défaut
-        )
-        
-        # Affichage du graphique de la performance
-        if strategies_to_plot:
-            st.line_chart(data_df[strategies_to_plot], use_container_width=True) 
+            # --- AFFICHAGE ---
+            
+            # 1. Paramètres Gagnants
+            st.subheader("🏆 Paramètres Optimaux Découverts")
+            c1, c2, c3 = st.columns(3)
+            c1.success(f"**Momentum**\n\n{best_params.get('Momentum')}")
+            c2.success(f"**Cross MMS**\n\n{best_params.get('Cross MMS')}")
+            c3.success(f"**Bollinger**\n\n{best_params.get('Bollinger')}")
+
+            # 2. Graphique
+            st.subheader("Performance Comparée (Base 100)")
+            st.line_chart(df_results)
+
+            # 3. Tableau Métriques
+            st.subheader("Détails de Performance")
+            metrics_df = pd.DataFrame(metrics_dict).T
+            metrics_df = metrics_df.sort_values(by="Sharpe", ascending=False)
+            
+            # Formatage
+            st.dataframe(metrics_df.style.format({
+                'Sharpe': '{:.2f}',
+                'Max Drawdown': '{:.2%}',
+                'Total Perf': '{:.2%}'
+            }))
+            
         else:
-            st.warning("Veuillez sélectionner au moins une courbe à afficher.")
-
-        st.markdown("---")
-        
-        # 2. AFFICHAGE DES MÉTRIQUES (Tableau de comparaison)
-        st.header("Synthèse des Métriques de Performance")
-        
-        # Créer le DataFrame des métriques pour un affichage clair
-        metrics_df = pd.DataFrame(metrics_results).T
-        
-        # Mise en forme des valeurs
-        metrics_df.columns = ['Sharpe Ratio', 'Max Drawdown', 'Performance Totale']
-        metrics_df['Sharpe Ratio'] = metrics_df['Sharpe Ratio'].map('{:.2f}'.format)
-        metrics_df['Max Drawdown'] = metrics_df['Max Drawdown'].map('{:.2%}'.format)
-        metrics_df['Performance Totale'] = metrics_df['Performance Totale'].map('{:.2%}'.format)
-        
-        st.table(metrics_df.sort_values(by='Sharpe Ratio', ascending=False))
-        
-        st.markdown("---")
-        
-        # 3. AFFICHAGE DES DONNÉES BRUTES (Optionnel, pour le débogage)
-        if st.checkbox("Afficher les données brutes du Backtesting"):
-            st.subheader("Données des Prix et Signaux")
-            st.dataframe(data_df)
-    
-# --- Fin de l'application Streamlit ---
+            st.error("Impossible de récupérer les données.")
