@@ -177,10 +177,15 @@ class SingleAssetAnalyzer:
             # 4. On décale toute la prédiction future pour recoller les morceaux
             preds = preds + offset
             # -----------------------------
+            # on va faire des volatilité plus restreinte, en ne prenant que 90 jours pour faire les calculs
+            recent_returns = df['Close'].pct_change().tail(90)
             
-            # Calcul de l'écart-type pour la zone de confiance
-            residuals = y - model.predict(X)
-            std_dev = np.std(residuals)
+            # 2. On calcule l'écart-type de ces variations
+            sigma_pct = recent_returns.std()
+            
+            # 3. On convertit ça en dollars par rapport au dernier prix
+            # (Ex: si le BTC est à 90k et la vol à 2%, l'écart-type est 1800$)
+            std_dev = sigma_pct * df['Close'].iloc[-1]
             
             return future_dates, preds, std_dev
         # --- MODÈLE 2 : ARIMA (AutoRegressive Integrated Moving Average) ---
@@ -402,12 +407,18 @@ if st.session_state.analyzer:
         # Préparation des données pour le graph
         recent = an.data['Close'].tail(180) # On montre les 6 derniers mois d'historique
         df_fut = pd.DataFrame({"Pred": fut_p}, index=fut_d)
+        # --- CORRECTION CÔNE D'INCERTITUDE ---
+        # On crée un vecteur qui augmente avec le temps : [1, 1.41, 1.73, 2.0 ...] (racine carrée des jours)
+        import numpy as np
+        time_scaling = np.sqrt(np.arange(1, len(df_fut) + 1))
         
-        # Intervalle de confiance (95% = 1.96 * écart-type)
-        df_fut["High"] = df_fut["Pred"] + (1.96 * std)
-        df_fut["Low"] = df_fut["Pred"] - (1.96 * std)
+        # On applique ce facteur à l'écart-type
+        # Plus on va loin dans le temps, plus l'écart-type est multiplié
+        df_fut["High"] = df_fut["Pred"] + (1.96 * std * time_scaling)
+        df_fut["Low"] = df_fut["Pred"] - (1.96 * std * time_scaling)
+        
+        # -------------------------------------
 
-        # Graphique Matplotlib
         import matplotlib.pyplot as plt
         fig, ax = plt.subplots(figsize=(12, 5))
         
@@ -423,11 +434,11 @@ if st.session_state.analyzer:
         
         # Petit texte explicatif selon le modèle choisi
         if model_choice == "ARIMA":
-            st.info("ℹ️ **ARIMA** analyse les cycles passés. Idéal pour les marchés volatils à court terme.")
+            st.info("ℹ️ **ARIMA** analyse les cycles passés. Idéal pour les marchés volatils à court terme, essayez de l'appliquer au bitcoin par exemple.")
         elif model_choice == "Machine Learning (RF)":
             st.info("ℹ️ **Random Forest** utilise l'IA pour repérer des motifs complexes (prix d'hier, avant-hier, moyennes).")
         else:
-            st.warning("⚠️ **Régression Linéaire** : Trace juste une tendance droite. Attention, ne prédit pas les chutes !")
+            st.warning("⚠️ **Régression Linéaire** : Trace juste une tendance droite. Attention, ne prédit pas les chutes ! Ce modèle est plus adapté pour les  cours stables, essayez plutôt une action de père de famille, comme air liquide ;)")
 
         ticker_clean = ticker.upper()
         #ajout du retour sur experience
@@ -439,10 +450,6 @@ if st.session_state.analyzer:
         # (Le ticker Air Liquide sur Yahoo est souvent AI.PA)
         elif ("AI.PA" in ticker_clean or "AIR LIQUIDE" in ticker_clean) and model_choice == "Linear Regression":
             st.success("✅ Bien vu ! Air Liquide est une action très stable avec une tendance long terme claire. La Régression Linéaire suffit largement et sera très propre.")
-        
-        # CAS 3 : LE RESTE (Optionnel, petit message informatif)
-        else:
-            st.info(f"Information : Vous utilisez {model_choice} sur {ticker}. C'est une approche intéressante à comparer.")
 
 else:
     st.info("👈 Veuillez cliquer sur 'Charger Données & Scanner' dans la barre latérale pour commencer.")
