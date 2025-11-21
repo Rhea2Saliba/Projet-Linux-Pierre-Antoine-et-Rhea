@@ -8,6 +8,7 @@ from sklearn.ensemble import RandomForestRegressor
 from statsmodels.tsa.arima.model import ARIMA
 from datetime import date, timedelta
 import itertools
+import matplotlib.pyplot as plt
 
 
 # --- 1. CLASSE D'ANALYSE (Backend Logic) ---
@@ -504,9 +505,11 @@ if st.session_state.analyzer:
 
 else:
     st.info("👈 Veuillez cliquer sur 'Charger Données & Scanner' dans la barre latérale pour commencer.")
-    # ============================================================
+
+
+# ============================================================
 # =====================   QUANT B   ==========================
-# ======== MULTI-ASSET PORTFOLIO — MARKOWITZ / MONTE-CARLO ===
+# ===== MULTI-ASSET PORTFOLIO — MARKOWITZ / MONTE-CARLO ======
 # ============================================================
 
 st.markdown("---")
@@ -517,76 +520,136 @@ with st.sidebar:
 
     # Choix des actifs
     tickers = st.multiselect(
-        "Sélectionne plusieurs actifs :",
-        ["AAPL", "MSFT", "BTC-USD", "GOOG", "AMZN", "TSLA", "META"],
-        default=["AAPL", "MSFT", "BTC-USD"]
-    )
+    "Sélectionne plusieurs actifs :",
+    [
+        "AAPL", "MSFT", "GOOG", "AMZN", "META", "TSLA",   # USA
+        "BTC-USD",                                       # Crypto
+        "AI.PA", "TTE.PA",                               # France
+        "GC=F",                                          # Or
+        "^GSPC"                                          # S&P500
+    ],
+    default=["AAPL", "MSFT", "BTC-USD", "AI.PA", "TTE.PA"]
+)
+
 
     # Période
-    start_b = st.date_input("Date de début", date(2020,1,1))
-    end_b = st.date_input("Date de fin", date.today())
+    start_b = st.date_input("Date de début", date(2020, 1, 1))
+    end_b   = st.date_input("Date de fin", date.today())
 
     # Sharpe
     rf_qb = st.number_input("Taux sans risque annuel", value=0.02, step=0.005)
 
-    # Nombre de portefeuilles simulés
-    N_sim = st.slider("Nombre de portefeuilles simulés (Monte Carlo)", 100, 10000, 3000)
+    # Nombre de simulations Monte-Carlo
+    N_sim = st.slider("Nombre de portefeuilles simulés (Monte Carlo)", 
+                      min_value=500, max_value=10000, value=3000, step=500)
 
+# ---------- Fonctions ----------
 def load_multi_assets(tickers, start, end):
-    """Télécharge les prix des actifs actifs."""
-    data = yf.download(tickers, start=start, end=end)["Close"]
-    return data.dropna()
+    df = yf.download(tickers, start=start, end=end)["Close"]
+    return df.dropna()
 
-def compute_portfolio_simulation(returns, N=3000, rf=0.02):
-    mean_ret = returns.mean() * 252
-    cov = returns.cov() * 252
+def compute_portfolio_stats(weights, mean_returns, cov_matrix):
+    """Retourne rendement, volatilité, sharpe."""
+    weights = np.array(weights)
+    port_return = np.sum(mean_returns * weights) * 252
+    port_vol = np.sqrt(weights.T @ cov_matrix @ weights) * np.sqrt(252)
+    sharpe = (port_return - rf_qb) / port_vol
+    return port_return, port_vol, sharpe
 
-    results = []
-    weights_list = []
+def efficient_frontier(mean_returns, cov_matrix, n_points=100):
+    """Calcule la frontière de Markowitz."""
+    results = {"return": [], "vol": [], "weights": []}
 
-    for _ in range(N):
-        w = np.random.random(len(mean_ret))
-        w = w / w.sum()
+    for _ in range(n_points):
+        w = np.random.random(len(mean_returns))
+        w /= np.sum(w)
 
-        port_ret = np.dot(w, mean_ret)
-        port_vol = np.sqrt(np.dot(w.T, np.dot(cov, w)))
-        sharpe = (port_ret - rf) / port_vol
+        ret, vol, _ = compute_portfolio_stats(w, mean_returns, cov_matrix)
+        
+        results["return"].append(ret)
+        results["vol"].append(vol)
+        results["weights"].append(w)
 
-        results.append([port_ret, port_vol, sharpe])
-        weights_list.append(w)
+    return pd.DataFrame(results)
 
-    df_results = pd.DataFrame(results, columns=["Return", "Vol", "Sharpe"])
-    return df_results, weights_list, mean_ret, cov
+def plot_efficient_frontier(df_random, df_frontier, max_sharpe_point):
+    fig, ax = plt.subplots(figsize=(10, 5))
 
+    ax.scatter(df_random["vol"], df_random["ret"], 
+               c=df_random["sharpe"], cmap="viridis",
+               s=12, alpha=0.7, label="Simulations Monte-Carlo")
+
+    ax.plot(df_frontier["vol"], df_frontier["return"],
+            color="red", linewidth=2.5, label="Frontière Efficiente")
+
+    ax.scatter(max_sharpe_point["vol"], max_sharpe_point["ret"],
+               color="gold", s=140, edgecolors="black", 
+               label="Portefeuille Max Sharpe")
+
+    ax.set_xlabel("Volatilité (σ)")
+    ax.set_ylabel("Rendement Annuel (%)")
+    ax.set_title("Frontière de Markowitz & Portefeuilles simulés")
+    ax.legend()
+    ax.grid(alpha=0.3)
+
+    st.pyplot(fig)
+
+# ---------- Exécution ----------
 if len(tickers) >= 2:
-    st.subheader("📥 Téléchargement des données (QuantB)")
+
+    st.subheader("📥 Téléchargement des données")
     df_prices = load_multi_assets(tickers, start_b, end_b)
-    st.success("Données téléchargées !")
-
     returns = df_prices.pct_change().dropna()
+    st.success("Données chargées !")
 
-    st.subheader("📈 Valeur cumulée du portefeuille (base 100)")
-    norm = df_prices / df_prices.iloc[0] * 100
-    st.line_chart(norm)
+    # Valeurs normalisées
+    st.subheader("📈 Valeur cumulée des actifs (Base 100)")
+    st.line_chart(df_prices / df_prices.iloc[0] * 100)
 
-    st.subheader("🧮 Matrice de Corrélation")
+    # Corrélation
+    st.subheader("🔗 Matrice de corrélation")
     st.dataframe(returns.corr())
 
-    st.subheader("🎯 Simulation Markowitz — Monte Carlo")
-    df_sim, w_list, mean_ret, cov = compute_portfolio_simulation(returns, N_sim, rf_qb)
+    # Monte-Carlo Markowitz
+    st.subheader("🎯 Simulation Markowitz — Monte-Carlo")
+    mean_returns = returns.mean()
+    cov_matrix = returns.cov()
+
+    sim_results = {"ret": [], "vol": [], "sharpe": [], "weights": []}
+
+    for _ in range(N_sim):
+        w = np.random.random(len(tickers))
+        w /= w.sum()
+
+        ret, vol, sharpe = compute_portfolio_stats(w, mean_returns, cov_matrix)
+
+        sim_results["ret"].append(ret)
+        sim_results["vol"].append(vol)
+        sim_results["sharpe"].append(sharpe)
+        sim_results["weights"].append(w)
+
+    df_random = pd.DataFrame(sim_results)
 
     # Meilleur Sharpe
-    idx_best = df_sim["Sharpe"].idxmax()
-    best_weights = w_list[idx_best]
+    idx_max = df_random["sharpe"].idxmax()
+    best_weights = df_random.loc[idx_max, "weights"]
 
-    st.success("Portefeuille à Sharpe Maximum trouvé !")
+    st.success("Portefeuille Max Sharpe trouvé ✔")
 
     df_w = pd.DataFrame({
-        "Actif": tickers,
-        "Poids (%)": [round(w*100,4) for w in best_weights]
+        "Actifs": tickers,
+        "Poids (%)": [round(w*100, 2) for w in best_weights]
     })
     st.dataframe(df_w)
 
-    st.subheader("📊 Frontière de Markowitz (Monte Carlo)")
-    st.scatter_chart(df_sim, x="Vol", y="Return", color="Sharpe")
+    # ---------- FRONTIERE DE MARKOWITZ ----------
+    st.subheader("📈 Frontière de Markowitz ")
 
+    df_frontier = efficient_frontier(mean_returns, cov_matrix)
+
+    max_point = {
+        "ret": df_random.loc[idx_max, "ret"],
+        "vol": df_random.loc[idx_max, "vol"]
+    }
+
+    plot_efficient_frontier(df_random, df_frontier, max_point)
