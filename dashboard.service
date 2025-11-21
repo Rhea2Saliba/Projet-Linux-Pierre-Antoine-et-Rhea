@@ -1,0 +1,17 @@
+[Unit]
+Description=Dashboard Finance Streamlit
+After=network.target
+
+[Service]
+# Remplace 'ubuntu' par ton nom d'utilisateur sur le serveur (souvent 'ubuntu', 'debian' ou 'root')
+User=ubuntu
+# Remplace par le chemin exact où tu as cloné le projet
+WorkingDirectory=/home/ubuntu/Projet-Linux-Pierre-Antoine-et-Rhea
+# Commande de lancement (vérifie le chemin de streamlit avec 'which streamlit')
+ExecStart=/usr/local/bin/streamlit run projetlinuxpartpa.py --server.port 8501
+# Important pour le critère de robustesse : relance l'app si elle plante
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
