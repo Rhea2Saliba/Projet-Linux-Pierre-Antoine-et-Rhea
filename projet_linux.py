@@ -486,25 +486,25 @@ if st.session_state.analyzer:
         
         # Petit texte explicatif selon le modèle choisi
     if model_choice == "ARIMA":
-        st.info("ℹ **ARIMA** analyse les cycles passés. Idéal pour les marchés volatils à court terme, essayez de l'appliquer au bitcoin par exemple.")
+        st.info("ℹ️ **ARIMA** analyse les cycles passés. Idéal pour les marchés volatils à court terme, essayez de l'appliquer au bitcoin par exemple.")
     elif model_choice == "Machine Learning (RF)":
-        st.info("ℹ**Random Forest** utilise l'IA pour repérer des motifs complexes (prix d'hier, avant-hier, moyennes).")
+        st.info("ℹ️ **Random Forest** utilise l'IA pour repérer des motifs complexes (prix d'hier, avant-hier, moyennes).")
     else:
-        st.warning(" **Régression Linéaire** : Trace juste une tendance droite. Attention, ne prédit pas les chutes ! Ce modèle est plus adapté pour les  cours stables, essayez plutôt une action de père de famille, comme air liquide ;)")
+        st.warning("⚠️ **Régression Linéaire** : Trace juste une tendance droite. Attention, ne prédit pas les chutes ! Ce modèle est plus adapté pour les  cours stables, essayez plutôt une action de père de famille, comme air liquide ;)")
 
     ticker_clean = ticker.upper()
         #ajout du retour sur experience
         # CAS 1 : BITCOIN + ARIMA
     if "BTC" in ticker_clean and model_choice == "ARIMA":
-        st.success(" Excellent choix ! Le Bitcoin est très volatil et cyclique, ARIMA est théoriquement le meilleur modèle pour capturer ces mouvements.")
+        st.success("✅ Excellent choix ! Le Bitcoin est très volatil et cyclique, ARIMA est théoriquement le meilleur modèle pour capturer ces mouvements.")
 
         # CAS 2 : AIR LIQUIDE + REGRESSION LINEAIRE
         # (Le ticker Air Liquide sur Yahoo est souvent AI.PA)
     elif ("AI.PA" in ticker_clean or "AIR LIQUIDE" in ticker_clean) and model_choice == "Linear Regression":
-        st.success("Bien vu ! Air Liquide est une action très stable avec une tendance long terme claire. La Régression Linéaire suffit largement et sera très propre.")
+        st.success("✅ Bien vu ! Air Liquide est une action très stable avec une tendance long terme claire. La Régression Linéaire suffit largement et sera très propre.")
 
 else:
-    st.info(" Veuillez cliquer sur 'Charger Données & Scanner' dans la barre latérale pour commencer.")
+    st.info("👈 Veuillez cliquer sur 'Charger Données & Scanner' dans la barre latérale pour commencer.")
 
 
 # ============================================================
@@ -513,7 +513,7 @@ else:
 # ============================================================
 
 st.markdown("---")
-st.header(" QuantB — Portfolio Multi-Assets (Markowitz & Monte-Carlo)")
+st.header("📊 QuantB — Portfolio Multi-Assets (Markowitz & Monte-Carlo)")
 
 with st.sidebar:
     st.subheader("⚙ Paramètres du portefeuille – QuantB")
@@ -597,21 +597,21 @@ def plot_efficient_frontier(df_random, df_frontier, max_sharpe_point):
 # ---------- Exécution ----------
 if len(tickers) >= 2:
 
-    st.subheader(" Téléchargement des données")
+    st.subheader("📥 Téléchargement des données")
     df_prices = load_multi_assets(tickers, start_b, end_b)
     returns = df_prices.pct_change().dropna()
     st.success("Données chargées !")
 
     # Valeurs normalisées
-    st.subheader(" Valeur cumulée des actifs (Base 100)")
+    st.subheader("📈 Valeur cumulée des actifs (Base 100)")
     st.line_chart(df_prices / df_prices.iloc[0] * 100)
 
     # Corrélation
-    st.subheader(" Matrice de corrélation")
+    st.subheader("🔗 Matrice de corrélation")
     st.dataframe(returns.corr())
 
     # Monte-Carlo Markowitz
-    st.subheader(" Simulation Markowitz — Monte-Carlo")
+    st.subheader("🎯 Simulation Markowitz — Monte-Carlo")
     mean_returns = returns.mean()
     cov_matrix = returns.cov()
 
@@ -643,7 +643,7 @@ if len(tickers) >= 2:
     st.dataframe(df_w)
 
     # ---------- FRONTIERE DE MARKOWITZ ----------
-    st.subheader("Frontière de Markowitz ")
+    st.subheader("📈 Frontière de Markowitz ")
 
     df_frontier = efficient_frontier(mean_returns, cov_matrix)
 
