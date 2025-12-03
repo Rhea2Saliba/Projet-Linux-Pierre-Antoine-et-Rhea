@@ -614,3 +614,33 @@ elif page == "Quant B - Gestion de Portefeuille":
         plot_efficient_frontier(df_random, df_frontier, max_point)
     else:
         st.warning("Veuillez sélectionner au moins 2 actifs dans la barre latérale.")
+with st.sidebar:
+    st.markdown("---")
+    st.header("📂 Espace Admin")
+    
+    import os
+    report_folder = "reports"
+    
+    # Vérifie si le dossier existe et contient des fichiers
+    if os.path.exists(report_folder) and os.listdir(report_folder):
+        files = [f for f in os.listdir(report_folder) if f.endswith(".txt")]
+        files.sort(reverse=True) # Les plus récents en premier
+        
+        if files:
+            selected_file = st.selectbox("Choisir un rapport :", files)
+            
+            if st.button("Lire le rapport"):
+                with open(os.path.join(report_folder, selected_file), "r") as f:
+                    st.session_state['log_content'] = f.read()
+    else:
+        st.caption("Aucun rapport disponible pour le moment.")
+
+# Affichage du contenu du rapport (si on a cliqué sur Lire)
+if 'log_content' in st.session_state:
+    st.markdown("---")
+    st.subheader("📄 Visualiseur de Rapport")
+    st.text_area("Contenu du fichier :", st.session_state['log_content'], height=300)
+    
+    if st.button("Fermer le rapport"):
+        del st.session_state['log_content']
+        st.rerun() 
