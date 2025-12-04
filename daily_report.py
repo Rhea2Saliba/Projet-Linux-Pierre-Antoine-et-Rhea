@@ -4,110 +4,180 @@ import pandas as pd
 import datetime
 import os
 
-# --- CONFIGURATION ---
+# --- CONFIGURATION GÉNÉRALE ---
+
 TICKERS = ["AAPL", "MSFT", "BTC-USD", "AI.PA", "TTE.PA"]
+
 REPORT_DIR = "/home/ubuntu/Projet-Linux-Pierre-Antoine-et-Rhea/reports"
 os.makedirs(REPORT_DIR, exist_ok=True)
 
-def get_data_and_stats():
-    # Téléchargement
-    df = yf.download(TICKERS, period="1y", progress=False)
-    
-    # --- FIX N/A : Aplatir proprement les colonnes ---
-    # Si on a des colonnes à étages (Price, Ticker), on garde que le Ticker
+HISTORY_FILE = os.path.join(REPORT_DIR, "portfolio_history.csv")
+
+INITIAL_CAPITAL = 10000.0  # capital de départ
+TARGET_WEIGHTS = np.array([1 / len(TICKERS)] * len(TICKERS))  # 20 % chacun
+
+
+def get_last_prices():
+    """
+    Récupère les derniers prix de clôture pour tous les tickers.
+    """
+    df = yf.download(TICKERS, period="1d", interval="1m", progress=False)
+
+    # Si MultiIndex -> on garde juste 'Close'
     if isinstance(df.columns, pd.MultiIndex):
-        # On extrait 'Close' et on SUPPRIME le niveau du haut (drop_level=True)
-        try:
-            df = df.xs('Close', axis=1, level=0, drop_level=True)
-        except:
-            pass # Si ça rate, on laisse tel quel
+        df = df.xs("Close", axis=1, level=0, drop_level=True)
+    else:
+        df = df["Close"]
 
-    # Nettoyage
-    df = df.select_dtypes(include=[np.number]).dropna()
-    returns = df.pct_change().dropna()
-    return df, returns
+    # On prend la dernière ligne
+    last_row = df.dropna().iloc[-1]
+    # On réordonne pour être sûr d'avoir les colonnes dans l'ordre de TICKERS
+    prices = last_row.reindex(TICKERS)
+    return prices  # Series index = tickers
 
-def run_markowitz_simulation(returns):
-    mean_returns = returns.mean()
-    cov_matrix = returns.cov()
-    num_portfolios = 3000
-    rf = 0.03
-    
-    best_sharpe = -100
-    best_weights = []
-    best_vol = 0
-    best_ret = 0
-    
-    for _ in range(num_portfolios):
-        weights = np.random.random(len(TICKERS))
-        weights /= np.sum(weights)
-        
-        port_return = np.sum(mean_returns * weights) * 252
-        port_vol = np.sqrt(np.dot(weights.T, np.dot(cov_matrix, weights))) * np.sqrt(252)
-        sharpe = (port_return - rf) / port_vol
-        
-        if sharpe > best_sharpe:
-            best_sharpe = sharpe
-            best_weights = weights
-            best_vol = port_vol
-            best_ret = port_return
-            
-    return best_weights, best_sharpe, best_vol, best_ret
 
-def generate_report():
-    try:
-        df_prices, returns = get_data_and_stats()
-        weights, sharpe, vol, ret = run_markowitz_simulation(returns)
-        
-        today = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        
-        content = f"""
+def init_portfolio(prices: pd.Series):
+    """
+    Initialise le portefeuille :
+    - capital initial
+    - calcul du nombre de titres par actif pour avoir 20 % chacun
+    """
+    capital = INITIAL_CAPITAL
+    shares = (capital * TARGET_WEIGHTS) / prices.values  # nb d'actions pour chaque ticker
+    return capital, shares
+
+
+def load_last_state():
+    """
+    Charge le dernier état du portefeuille si l'historique existe.
+    Retourne (capital, shares_array, df_history) ou (None, None, None)
+    """
+    if not os.path.exists(HISTORY_FILE):
+        return None, None, None
+
+    hist = pd.read_csv(HISTORY_FILE)
+    if hist.empty:
+        return None, None, hist
+
+    last = hist.iloc[-1]
+    capital = float(last["capital"])
+    shares = np.array([last[f"{t}_shares"] for t in TICKERS], dtype=float)
+
+    return capital, shares, hist
+
+
+def step_rebalance():
+    """
+    Une étape de rebalancement :
+    - lit le dernier état (ou initialise)
+    - met à jour la valeur du portefeuille avec les nouveaux prix
+    - rebalance à 20 % / actif
+    - sauvegarde une nouvelle ligne dans HISTORY_FILE
+    - génère un rapport texte simple
+    """
+    prices = get_last_prices()
+
+    # On essaie de charger l'état précédent
+    capital_prev, shares_prev, hist = load_last_state()
+
+    if hist is None:
+        # pas d'historique → on va créer un DataFrame vide
+        hist = pd.DataFrame()
+
+    # 1) Si c'est la première fois → on initialise
+    if capital_prev is None or shares_prev is None:
+        capital = INITIAL_CAPITAL
+        shares = (capital * TARGET_WEIGHTS) / prices.values
+    else:
+        # 2) Sinon : on valorise l'ancien portefeuille avec les nouveaux prix
+        capital = float(np.sum(shares_prev * prices.values))
+        # Rebalancement à 20 % chacun
+        shares = (capital * TARGET_WEIGHTS) / prices.values
+
+    # Construction de la nouvelle ligne
+    now = datetime.datetime.now()
+    row = {
+        "datetime": now.strftime("%Y-%m-%d %H:%M:%S"),
+        "capital": capital,
+    }
+    for t, s in zip(TICKERS, shares):
+        row[f"{t}_shares"] = s
+        row[f"{t}_weight_target"] = 100.0 / len(TICKERS)  # 20 % chacun, fixe
+
+    # Ajout à l'historique
+    hist = pd.concat([hist, pd.DataFrame([row])], ignore_index=True)
+
+    # Sauvegarde CSV
+    hist.to_csv(HISTORY_FILE, index=False)
+
+    # Génération d'un petit rapport texte (optionnel)
+    report_txt = f"""
 =========================================================
    RAPPORT DE GESTION - QUANT B (AUTOMATISÉ)
-   Date : {today}
+   Date : {now.strftime("%Y-%m-%d %H:%M:%S")}
 =========================================================
 
-1. ANALYSE DU MARCHÉ (Derniers Prix)
-------------------------------------
+1. PORTEFEUILLE ÉGAL-PONDÉRÉ (20 % chaque actif)
+------------------------------------------------
+Capital actuel : {capital:,.2f} $
+
+Détail des positions (après rebalancement) :
 """
-        # Récupération des prix corrigée
-        last_prices = df_prices.iloc[-1]
-        for ticker in TICKERS:
-            try:
-                val = last_prices[ticker]
-                content += f"  - {ticker: <10} : {val:.2f} $\n"
-            except:
-                content += f"  - {ticker: <10} : N/A\n"
+    for t, s, p in zip(TICKERS, shares, prices.values):
+        value = s * p
+        report_txt += f"  - {t:<8} : {s:.4f} titres  (~{value:,.2f} $)\n"
 
-        content += f"""
-------------------------------------
+    report_txt += """
+Rebalancement : 20 % par actif, exécuté automatiquement.
 
-2. STRATÉGIE OPTIMALE (Markowitz)
-------------------------------------
-Basé sur 3000 simulations Monte-Carlo.
-
-> Performance Attendue (Annuelle) : {ret:.2%}
-> Risque (Volatilité)             : {vol:.2%}
-> Score de Sharpe                 : {sharpe:.2f}
-
-ALLOCATION RECOMMANDÉE POUR DEMAIN :
-"""
-        for ticker, w in zip(TICKERS, weights):
-            content += f"  - {ticker: <10} : {w*100:.2f} %\n"
-
-        content += f"""
 =========================================================
 Statut : Succès
-Serveur : AWS EC2 - Cron Job
+Serveur : AWS EC2 - Cron Job (toutes les 5 minutes)
 =========================================================
 """
-        filename = f"{REPORT_DIR}/report_{datetime.date.today()}.txt"
-        with open(filename, "w") as f:
-            f.write(content)
-        print(f"Rapport généré : {filename}")
 
-    except Exception as e:
-        print(f"Erreur : {e}")
+    # On écrase le rapport du jour (1 fichier par jour par ex.)
+    filename = os.path.join(REPORT_DIR, f"report_{now.date()}.txt")
+    with open(filename, "w") as f:
+        f.write(report_txt)
+
+    print(f"[OK] Rebalancement effectué - Capital: {capital:,.2f} $")
+    print(f"[OK] Historique mis à jour : {HISTORY_FILE}")
+    print(f"[OK] Rapport texte : {filename}")
+
 
 if __name__ == "__main__":
-    generate_report()
+    step_rebalance()
+    # ================================
+    # 🔎 HISTORIQUE RÉEL DU PORTEFEUILLE (CRON 5 min)
+    # ================================
+    import os
+
+    HISTORY_FILE = "/home/ubuntu/Projet-Linux-Pierre-Antoine-et-Rhea/reports/portfolio_history.csv"
+
+    st.markdown("---")
+    st.subheader("📊 Évolution réelle du portefeuille (bot 20 % / actif)")
+
+    if os.path.exists(HISTORY_FILE):
+        hist = pd.read_csv(HISTORY_FILE, parse_dates=["datetime"])
+
+        # Courbe du capital
+        fig_hist = px.line(
+            hist,
+            x="datetime",
+            y="capital",
+            labels={"datetime": "Date / Heure", "capital": "Valeur du portefeuille ($)"},
+            title="Capital du portefeuille au fil des rebalancements (cron 5 min)",
+        )
+        st.plotly_chart(fig_hist, use_container_width=True)
+
+        # Dernier état (pour voir clairement le rebalancement)
+        st.subheader("🧾 Dernier rebalancement exécuté")
+        last_row = hist.tail(1).T
+        st.dataframe(last_row, use_container_width=True)
+
+    else:
+        st.info(
+            "Aucun historique trouvé pour le portefeuille réel. "
+            "Lance d'abord le script `report.py` (manuellement ou via cron) pour commencer l'enregistrement."
+        )
