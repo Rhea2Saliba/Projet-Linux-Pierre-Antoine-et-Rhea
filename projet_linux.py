@@ -890,7 +890,47 @@ elif page == "Quant B - Gestion de Portefeuille":
 
     else:
         st.warning("Veuillez sélectionner au moins 2 actifs dans la barre latérale.")
-
+HISTORY_FILE = "reports/portfolio_history.csv"
+        
+st.markdown("---")
+st.subheader("📊 Évolution réelle du portefeuille (Bot Rebalance 20%)")
+        
+if os.path.exists(HISTORY_FILE):
+    hist = pd.read_csv(HISTORY_FILE)
+            
+            # Plot Total Value over time
+    fig_hist = px.line(
+        hist, 
+        x="Date", 
+        y="Total_Value", 
+        title="Valeur Totale du Portefeuille (Rebalancement Quotidien)",
+        markers=True
+    )
+    st.plotly_chart(fig_hist, use_container_width=True)
+            
+            # Show the last rebalancing details
+    st.write("### 🧾 Dernier Rebalancement Exécuté")
+    last_row = hist.iloc[-1]
+    st.write(f"**Date :** {last_row['Date']}")
+    st.write(f"**Valeur Totale :** {last_row['Total_Value']:.2f} $")
+            
+            # Create a nice table for current holdings
+    holdings = []
+    tickers = ["AAPL", "MSFT", "BTC-USD", "AI.PA", "TTE.PA"]
+    for t in tickers:
+        if f"{t}_shares" in last_row:
+            holdings.append({
+                "Actif": t,
+                "Parts Détenues": f"{last_row[f'{t}_shares']:.4f}",
+                "Prix": f"{last_row[f'{t}_price']:.2f} $",
+                "Valeur Position": f"{last_row[f'{t}_value']:.2f} $"
+            })
+            
+    st.dataframe(pd.DataFrame(holdings))
+            
+else:
+    st.info("⚠️ Aucun historique trouvé. Le script automatique (Cron) n'a pas encore tourné aujourd'hui.")
+    st.caption("Le premier rapport sera généré à 20h00, ou lancez `python3 daily_report.py` sur le serveur pour initialiser.")
 
 # ======================================================================
 #                      ESPACE ADMIN / RAPPORTS
