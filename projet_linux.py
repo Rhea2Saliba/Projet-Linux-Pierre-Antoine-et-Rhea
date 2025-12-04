@@ -7,12 +7,14 @@ from sklearn.ensemble import RandomForestRegressor
 from statsmodels.tsa.arima.model import ARIMA
 from datetime import date, timedelta
 import itertools
+import os
 
 import plotly.express as px
 import plotly.graph_objects as go
 
+st.set_page_config(layout="wide", page_title="Projet Finance: Quant A & B")
 
-# --- 1. CLASSE D'ANALYSE (Backend Logic) ---
+# --- 1. CLASSE QUANT A (Backend Logic) ---
 class SingleAssetAnalyzer:
     def __init__(self, ticker, start_date, end_date, initial_investment=1000):
         self.ticker = ticker
@@ -105,14 +107,13 @@ class SingleAssetAnalyzer:
 
         return strat_curve, strat_returns
 
-    # --- PARTIE OPTIMISATION (LE CERVEAU) ---
     def find_best_params(self):
         """Teste plein de combinaisons et stocke les gagnantes."""
 
         # 1. Optimisation Momentum
         best_sharpe = -999
         best_p = {"window": 50}
-        for w in range(10, 100, 10):
+        for w in range(10, 150, 10):
             _, rets = self.run_strategy("Momentum", window=w)
             m = self.compute_metrics(rets)
             if m["Raw_Sharpe"] > best_sharpe:
@@ -123,7 +124,7 @@ class SingleAssetAnalyzer:
         # 2. Optimisation Cross MMS
         best_sharpe = -999
         best_p = {"short_w": 20, "long_w": 50}
-        for s, l in itertools.product(range(10, 50, 10), range(50, 150, 20)):
+        for s, l in itertools.product(range(10, 60, 10), range(50, 200, 20)):
             if s >= l:
                 continue
             _, rets = self.run_strategy("Cross MMS", short_w=s, long_w=l)
@@ -136,7 +137,7 @@ class SingleAssetAnalyzer:
         # 3. Optimisation BB
         best_sharpe = -999
         best_p = {"window": 20, "std_dev": 2.0}
-        for w, std in itertools.product(range(10, 50, 10), [1.5, 2.0, 2.5]):
+        for w, std in itertools.product(range(10, 60, 10), [1.5, 2.0, 2.5]):
             _, rets = self.run_strategy("Mean Reversion (BB)", window=w, std_dev=std)
             m = self.compute_metrics(rets)
             if m["Raw_Sharpe"] > best_sharpe:
@@ -144,58 +145,50 @@ class SingleAssetAnalyzer:
                 best_p = {"window": w, "std_dev": std}
         self.best_params["Mean Reversion (BB)"] = best_p
 
-    # new fontion pour les différents modèles
     def predict_future(self, days_ahead=30, model_type="Linear Regression"):
-        """
-        Génère des prédictions selon le modèle choisi :
-        1. Linear Regression (Tendance simple)
-        2. ARIMA (Séries temporelles, capture les cycles)
-        3. Random Forest (Machine Learning, capture les motifs complexes)
-        """
+        """Génère des prédictions (Linear, ARIMA, RF)."""
         df = self.data.copy()
         last_date = df.index[-1]
         future_dates = [last_date + timedelta(days=i) for i in range(1, days_ahead + 1)]
 
-        # --- MODÈLE 1 : RÉGRESSION LINÉAIRE (CORRIGÉ AVEC ANCRAGE) ---
+        # --- MODÈLE 1 : RÉGRESSION LINÉAIRE ---
         if model_type == "Linear Regression":
             df = df.reset_index()
             df["Date_Ordinal"] = df["Date"].map(pd.Timestamp.toordinal)
             X = df[["Date_Ordinal"]].values
             y = df["Close"].values
 
-            # Entrainement sur tout l'historique pour avoir la PENTE (la direction)
+            # Entrainement
             model = LinearRegression().fit(X, y)
-
             future_ordinals = [[d.toordinal()] for d in future_dates]
             preds = model.predict(future_ordinals)
 
-            # Ancrage
+            # Fix Ancrage
             last_day_ordinal = [[X[-1][0]]]
-            theoretical_price_today = model.predict(last_day_ordinal)[0]
-            actual_price_today = y[-1]
-            offset = actual_price_today - theoretical_price_today
+            theoretical_price = model.predict(last_day_ordinal)[0]
+            actual_price = y[-1]
+            offset = actual_price - theoretical_price
             preds = preds + offset
 
-            # Volatilité locale
+            # Fix Volatilité (90 jours)
             recent_returns = df["Close"].pct_change().tail(90)
             sigma_pct = recent_returns.std()
             std_dev = sigma_pct * df["Close"].iloc[-1]
 
             return future_dates, preds, std_dev
 
-        # --- MODÈLE 2 : ARIMA (AutoRegressive Integrated Moving Average) ---
+        # --- MODÈLE 2 : ARIMA ---
         elif model_type == "ARIMA":
             history = df["Close"].values
             model = ARIMA(history, order=(5, 1, 0))
             model_fit = model.fit()
-
             preds = model_fit.forecast(steps=days_ahead)
 
             residuals = model_fit.resid
             std_dev = np.std(residuals[1:])
             return future_dates, preds, std_dev
 
-        # --- MODÈLE 3 : RANDOM FOREST (Machine Learning) ---
+        # --- MODÈLE 3 : RANDOM FOREST ---
         elif model_type == "Machine Learning (RF)":
             df["Lag1"] = df["Close"].shift(1)
             df["Lag2"] = df["Close"].shift(2)
@@ -224,387 +217,16 @@ class SingleAssetAnalyzer:
 
             return future_dates, np.array(preds), std_dev
 
-        return [], [], 0  # Fallback si erreur
+        return [], [], 0
 
 
-# --- 2. INTERFACE STREAMLIT ---
-
-st.set_page_config(layout="wide", page_title="Smart Quant Lab")
-st.title("🧠 Smart Quant Lab: Analyse & Optimisation")
-
-# Initialisation session state pour ne pas perdre les calculs
-if "analyzer" not in st.session_state:
-    st.session_state.analyzer = None
-
-with st.sidebar:
-    st.header("1. Paramètres Généraux")
-    ticker = st.text_input("Ticker", "BTC-USD")
-    s_date = st.date_input("Début", date(2020, 1, 1))
-    e_date = st.date_input("Fin", date.today())
-
-    if st.button("📥 Charger Données & Scanner"):
-        an = SingleAssetAnalyzer(ticker, s_date, e_date)
-        if an.load_data():
-            with st.spinner("Le robot cherche les meilleurs paramètres..."):
-                an.find_best_params()  # On lance l'optimisation ici
-            st.session_state.analyzer = an
-            st.success("Scan terminé !")
-
-    st.markdown("---")
-
-    # On affiche les contrôles seulement si l'analyseur est chargé
-    if st.session_state.analyzer:
-        an = st.session_state.analyzer
-
-        st.header("2. Contrôle Manuel")
-        strat_choice = st.selectbox(
-            "Stratégie Active", ["Momentum", "Cross MMS", "Mean Reversion (BB)", "TOUT COMPARER"]
-        )
-
-        manual_params = {}
-
-        if strat_choice == "Momentum" or strat_choice == "TOUT COMPARER":
-            st.markdown("### Paramètres Momentum")
-            rec = an.best_params["Momentum"]["window"]
-            st.caption(f"💡 Suggestion IA : {rec}")
-            manual_params["mom_window"] = st.slider(
-                "Fenêtre Momentum", 10, 200, 50, key="mom_slider"
-            )
-
-        if strat_choice == "Cross MMS" or strat_choice == "TOUT COMPARER":
-            st.markdown("### Paramètres Cross MMS")
-            rec_s = an.best_params["Cross MMS"]["short_w"]
-            rec_l = an.best_params["Cross MMS"]["long_w"]
-            st.caption(f"💡 Suggestion IA : Court={rec_s}, Long={rec_l}")
-            manual_params["cross_short"] = st.slider(
-                "MMS Court", 5, 50, 20, key="cross_s_slider"
-            )
-            manual_params["cross_long"] = st.slider(
-                "MMS Long", 50, 200, 100, key="cross_l_slider"
-            )
-
-        if strat_choice == "Mean Reversion (BB)" or strat_choice == "TOUT COMPARER":
-            st.markdown("### Paramètres Bollinger")
-            rec_w = an.best_params["Mean Reversion (BB)"]["window"]
-            rec_std = an.best_params["Mean Reversion (BB)"]["std_dev"]
-            st.caption(f"💡 Suggestion IA : Fenêtre={rec_w}, Std={rec_std}")
-            manual_params["bb_window"] = st.slider(
-                "Fenêtre BB", 10, 100, 20, key="bb_w_slider"
-            )
-            manual_params["bb_std"] = st.slider(
-                "Écart-Type", 1.0, 3.0, 2.0, key="bb_std_slider"
-            )
-
-        st.markdown("---")
-        st.header("3. Prédiction (Bonus)")
-
-        model_choice = st.selectbox(
-            "Choisir le Modèle", ["Linear Regression", "ARIMA", "Machine Learning (RF)"]
-        )
-        forecast_days = st.slider("Jours à prédire", 7, 90, 30)
-
-# --- AFFICHAGE PRINCIPAL ---
-
-if st.session_state.analyzer:
-    an = st.session_state.analyzer
-    bh_curve = (1 + an.daily_returns).cumprod() * an.initial_investment
-
-    # --- CAS 1 : COMPARAISON GLOBALE ---
-    if strat_choice == "TOUT COMPARER":
-        st.subheader("⚡ Comparaison Multi-Stratégies (Paramètres Manuels)")
-
-        c_mom, _ = an.run_strategy("Momentum", window=manual_params["mom_window"])
-        c_cross, _ = an.run_strategy(
-            "Cross MMS",
-            short_w=manual_params["cross_short"],
-            long_w=manual_params["cross_long"],
-        )
-        c_bb, _ = an.run_strategy(
-            "Mean Reversion (BB)",
-            window=manual_params["bb_window"],
-            std_dev=manual_params["bb_std"],
-        )
-
-        df_all = pd.DataFrame(
-            {
-                "Buy & Hold": bh_curve,
-                "Momentum": c_mom,
-                "Cross MMS": c_cross,
-                "Bollinger": c_bb,
-            }
-        )
-
-        fig_all = px.line(
-            df_all,
-            labels={"index": "Date", "value": "Valeur du portefeuille", "variable": "Stratégie"},
-        )
-        st.plotly_chart(fig_all, use_container_width=True)
-
-        st.write("### Valeurs Finales du Portefeuille")
-        res_finaux = df_all.iloc[-1].sort_values(ascending=False)
-        st.dataframe(res_finaux.map("{:.2f} $".format))
-
-    # --- CAS 2 : MODE SOLO ---
-    else:
-        args = {}
-        if strat_choice == "Momentum":
-            args = {"window": manual_params["mom_window"]}
-        elif strat_choice == "Cross MMS":
-            args = {
-                "short_w": manual_params["cross_short"],
-                "long_w": manual_params["cross_long"],
-            }
-        elif strat_choice == "Mean Reversion (BB)":
-            args = {
-                "window": manual_params["bb_window"],
-                "std_dev": manual_params["bb_std"],
-            }
-
-        strat_curve, strat_rets = an.run_strategy(strat_choice, **args)
-        met_strat = an.compute_metrics(strat_rets)
-        met_bh = an.compute_metrics(an.daily_returns)
-
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Stratégie", strat_choice)
-        c2.metric(
-            "Sharpe Ratio",
-            met_strat["Sharpe"],
-            delta=f"{met_strat['Sharpe'] - met_bh['Sharpe']:.2f} vs B&H",
-        )
-        c3.metric("Max Drawdown", met_strat["Max Drawdown"])
-        c4.metric("Gain Total", met_strat["Total Perf"])
-
-        st.subheader(f"📈 Analyse : {strat_choice} vs Marché")
-        df_chart = pd.DataFrame(
-            {"Buy & Hold (Marché)": bh_curve, f"Ma Stratégie ({strat_choice})": strat_curve}
-        )
-
-        color_map = {}
-        cols = df_chart.columns.tolist()
-        if len(cols) > 0:
-            color_map[cols[0]] = "#FF4B4B"
-        if len(cols) > 1:
-            color_map[cols[1]] = "#0068C9"
-
-        fig_chart = px.line(
-            df_chart,
-            labels={"index": "Date", "value": "Valeur du portefeuille", "variable": "Courbe"},
-            color_discrete_map=color_map,
-        )
-        st.plotly_chart(fig_chart, use_container_width=True)
-
-    # 4. SECTION COMPARATIVE (Le "Battle" des stratégies optimisées)
-    st.markdown("---")
-    st.subheader("⚔️ Battle Royale : Comparaison des Modèles Optimisés")
-    st.caption(
-        "Voici ce que ça donnerait si on prenait les MEILLEURS paramètres pour chaque stratégie sur cette période."
-    )
-
-    curve_mom, ret_mom = an.run_strategy("Momentum", **an.best_params["Momentum"])
-    curve_cross, ret_cross = an.run_strategy("Cross MMS", **an.best_params["Cross MMS"])
-    curve_bb, ret_bb = an.run_strategy(
-        "Mean Reversion (BB)", **an.best_params["Mean Reversion (BB)"]
-    )
-
-    df_battle = pd.DataFrame(
-        {
-            "Buy & Hold": bh_curve,
-            "Momentum (Opti)": curve_mom,
-            "Cross MMS (Opti)": curve_cross,
-            "Bollinger (Opti)": curve_bb,
-        }
-    )
-
-    fig_battle = px.line(
-        df_battle,
-        labels={"index": "Date", "value": "Valeur du portefeuille", "variable": "Stratégie"},
-    )
-    st.plotly_chart(fig_battle, use_container_width=True)
-
-    st.subheader("🏆 Le Bulletin de Notes")
-
-    met_bh = an.compute_metrics(an.daily_returns)
-    met_mom = an.compute_metrics(ret_mom)
-    met_cross = an.compute_metrics(ret_cross)
-    met_bb = an.compute_metrics(ret_bb)
-
-    leaderboard_data = [
-        {
-            "Stratégie": "Buy & Hold (Marché)",
-            "Sharpe Ratio": met_bh["Sharpe"],
-            "Max Drawdown": met_bh["Max Drawdown"],
-            "Perf Totale": met_bh["Total Perf"],
-            "Capital Final ($)": f"{bh_curve.iloc[-1]:.2f} $",
-        },
-        {
-            "Stratégie": f"Momentum (Win: {an.best_params['Momentum']['window']})",
-            "Sharpe Ratio": met_mom["Sharpe"],
-            "Max Drawdown": met_mom["Max Drawdown"],
-            "Perf Totale": met_mom["Total Perf"],
-            "Capital Final ($)": f"{curve_mom.iloc[-1]:.2f} $",
-        },
-        {
-            "Stratégie": f"Cross MMS (S:{an.best_params['Cross MMS']['short_w']} L:{an.best_params['Cross MMS']['long_w']})",
-            "Sharpe Ratio": met_cross["Sharpe"],
-            "Max Drawdown": met_cross["Max Drawdown"],
-            "Perf Totale": met_cross["Total Perf"],
-            "Capital Final ($)": f"{curve_cross.iloc[-1]:.2f} $",
-        },
-        {
-            "Stratégie": f"Bollinger (W:{an.best_params['Mean Reversion (BB)']['window']} Std:{an.best_params['Mean Reversion (BB)']['std_dev']})",
-            "Sharpe Ratio": met_bb["Sharpe"],
-            "Max Drawdown": met_bb["Max Drawdown"],
-            "Perf Totale": met_bb["Total Perf"],
-            "Capital Final ($)": f"{curve_bb.iloc[-1]:.2f} $",
-        },
-    ]
-
-    df_leaderboard = pd.DataFrame(leaderboard_data)
-    df_leaderboard.set_index("Stratégie", inplace=True)
-    df_leaderboard.sort_values(by="Sharpe Ratio", ascending=False, inplace=True)
-
-    st.dataframe(df_leaderboard, use_container_width=True)
-
-    # B. SECTION PRÉDICTION
-    st.markdown("---")
-    st.subheader(f"🔮 Prédiction Future : {model_choice}")
-
-    with st.spinner(f"Calcul du modèle {model_choice} en cours..."):
-        fut_d, fut_p, std = an.predict_future(forecast_days, model_type=model_choice)
-
-    recent = an.data["Close"].tail(180)
-    df_fut = pd.DataFrame({"Pred": fut_p}, index=fut_d)
-
-    time_scaling = np.sqrt(np.arange(1, len(df_fut) + 1))
-    df_fut["High"] = df_fut["Pred"] + (1.96 * std * time_scaling)
-    df_fut["Low"] = df_fut["Pred"] - (1.96 * std * time_scaling)
-
-    fig_pred = go.Figure()
-    fig_pred.add_trace(
-        go.Scatter(
-            x=recent.index,
-            y=recent.values,
-            mode="lines",
-            name="Historique Récent",
-            line=dict(color="black"),
-        )
-    )
-    fig_pred.add_trace(
-        go.Scatter(
-            x=df_fut.index,
-            y=df_fut["Pred"],
-            mode="lines",
-            name=f"Prédiction ({model_choice})",
-            line=dict(color="#0068C9", dash="dash"),
-        )
-    )
-    fig_pred.add_trace(
-        go.Scatter(
-            x=df_fut.index,
-            y=df_fut["High"],
-            mode="lines",
-            line=dict(width=0),
-            showlegend=False,
-        )
-    )
-    fig_pred.add_trace(
-        go.Scatter(
-            x=df_fut.index,
-            y=df_fut["Low"],
-            mode="lines",
-            fill="tonexty",
-            name="Zone de Confiance 95%",
-            line=dict(width=0),
-            fillcolor="rgba(0,104,201,0.15)",
-        )
-    )
-
-    fig_pred.update_layout(
-        title=f"Projection {ticker} sur {forecast_days} jours",
-        xaxis_title="Date",
-        yaxis_title="Prix",
-        legend_title="Série",
-    )
-
-    st.plotly_chart(fig_pred, use_container_width=True)
-
-    if model_choice == "ARIMA":
-        st.info(
-            "ℹ️ **ARIMA** analyse les cycles passés. Idéal pour les marchés volatils à court terme, essayez de l'appliquer au bitcoin par exemple."
-        )
-    elif model_choice == "Machine Learning (RF)":
-        st.info(
-            "ℹ️ **Random Forest** utilise l'IA pour repérer des motifs complexes (prix d'hier, avant-hier, moyennes)."
-        )
-    else:
-        st.warning(
-            "⚠️ **Régression Linéaire** : Trace juste une tendance droite. Attention, ne prédit pas les chutes ! Ce modèle est plus adapté pour les cours stables, essayez plutôt une action de père de famille, comme Air Liquide ;)"
-        )
-
-    ticker_clean = ticker.upper()
-    if "BTC" in ticker_clean and model_choice == "ARIMA":
-        st.success(
-            "✅ Excellent choix ! Le Bitcoin est très volatil et cyclique, ARIMA est théoriquement le meilleur modèle pour capturer ces mouvements."
-        )
-    elif ("AI.PA" in ticker_clean or "AIR LIQUIDE" in ticker_clean) and model_choice == "Linear Regression":
-        st.success(
-            "✅ Bien vu ! Air Liquide est une action très stable avec une tendance long terme claire. La Régression Linéaire suffit largement et sera très propre."
-        )
-
-else:
-    st.info("👈 Veuillez cliquer sur 'Charger Données & Scanner' dans la barre latérale pour commencer.")
-
-
-# ============================================================
-# =====================   QUANT B   ==========================
-# ===== MULTI-ASSET PORTFOLIO — MARKOWITZ / MONTE-CARLO ======
-# ============================================================
-
-st.markdown("---")
-st.header("📊 QuantB — Portfolio Multi-Assets (Markowitz & Monte-Carlo)")
-
-with st.sidebar:
-    st.subheader("⚙ Paramètres du portefeuille – QuantB")
-
-    tickers = st.multiselect(
-        "Sélectionne plusieurs actifs :",
-        [
-            "AAPL",
-            "MSFT",
-            "GOOG",
-            "AMZN",
-            "META",
-            "TSLA",  # USA
-            "BTC-USD",  # Crypto
-            "AI.PA",
-            "TTE.PA",  # France
-            "GC=F",  # Or
-            "^GSPC",  # S&P500
-        ],
-        default=["AAPL", "MSFT", "BTC-USD", "AI.PA", "TTE.PA"],
-    )
-
-    start_b = st.date_input("Date de début", date(2020, 1, 1))
-    end_b = st.date_input("Date de fin", date.today())
-
-    rf_qb = st.number_input("Taux sans risque annuel", value=0.02, step=0.005)
-
-    N_sim = st.slider(
-        "Nombre de portefeuilles simulés (Monte Carlo)",
-        min_value=500,
-        max_value=10000,
-        value=3000,
-        step=500,
-    )
-
-
-# ---------- Fonctions ----------
+# --- 2. FONCTIONS QUANT B (PORTFOLIO) ---
 def load_multi_assets(tickers, start, end):
-    df = yf.download(tickers, start=start, end=end)["Close"]
+    df = yf.download(tickers, start=start, end=end, progress=False)["Close"]
     return df.dropna()
 
 
-def compute_portfolio_stats(weights, mean_returns, cov_matrix):
+def compute_portfolio_stats(weights, mean_returns, cov_matrix, rf_qb):
     """Retourne rendement, volatilité, sharpe."""
     weights = np.array(weights)
     port_return = np.sum(mean_returns * weights) * 252
@@ -613,7 +235,7 @@ def compute_portfolio_stats(weights, mean_returns, cov_matrix):
     return port_return, port_vol, sharpe
 
 
-def efficient_frontier(mean_returns, cov_matrix, n_points=100):
+def efficient_frontier(mean_returns, cov_matrix, rf_qb, n_points=100):
     """Calcule la frontière de Markowitz."""
     results = {"return": [], "vol": [], "weights": []}
 
@@ -621,7 +243,7 @@ def efficient_frontier(mean_returns, cov_matrix, n_points=100):
         w = np.random.random(len(mean_returns))
         w /= np.sum(w)
 
-        ret, vol, _ = compute_portfolio_stats(w, mean_returns, cov_matrix)
+        ret, vol, _ = compute_portfolio_stats(w, mean_returns, cov_matrix, rf_qb)
 
         results["return"].append(ret)
         results["vol"].append(vol)
@@ -680,86 +302,679 @@ def plot_efficient_frontier(df_random, df_frontier, max_sharpe_point):
     st.plotly_chart(fig, use_container_width=True)
 
 
-# ---------- Exécution ----------
-if len(tickers) >= 2:
-    st.subheader("📥 Téléchargement des données")
-    df_prices = load_multi_assets(tickers, start_b, end_b)
-    returns = df_prices.pct_change().dropna()
-    st.success("Données chargées !")
+def simulate_rebalanced_portfolio(returns, target_weights, initial_capital=10000.0):
+    """
+    Portefeuille à rééquilibrage constant-mix :
+    - À chaque jour, on applique les poids cibles normalisés.
+    - returns : DataFrame de rendements journaliers des actifs.
+    """
+    capital = initial_capital
+    port_values = []
 
-    st.subheader("📈 Valeur cumulée des actifs (Base 100)")
-    norm = df_prices / df_prices.iloc[0] * 100
-    fig_norm = px.line(
-        norm,
-        labels={"index": "Date", "value": "Valeur (base 100)", "variable": "Actif"},
-    )
-    st.plotly_chart(fig_norm, use_container_width=True)
+    w = np.array(target_weights)
 
-    st.subheader("🔗 Matrice de corrélation")
-    st.dataframe(returns.corr())
+    for _, ret_row in returns.iterrows():
+        port_return = np.dot(w, ret_row.values)
+        capital *= (1.0 + port_return)
+        port_values.append(capital)
 
-    # ======= ➤ NOUVELLE SECTION : POIDS PERSONNALISÉS =========
-    st.subheader("🎛️ Poids personnalisés du portefeuille")
+    return pd.Series(port_values, index=returns.index)
 
-    mean_returns = returns.mean()
-    cov_matrix = returns.cov()
 
-    user_weights = {}
-    for t in tickers:
-        user_weights[t] = st.slider(
-            f"Poids de {t}",
-            0.0, 1.0, 1.0 / len(tickers), 0.01
+# ==============================================================================
+#                                   NAVIGATION
+# ==============================================================================
+
+st.sidebar.title("🧭 Navigation")
+page = st.sidebar.radio(
+    "Aller vers :", ["Quant A - Analyse Actif Unique", "Quant B - Gestion de Portefeuille"]
+)
+st.sidebar.markdown("---")
+
+
+# ==============================================================================
+#                                   MODULE QUANT A
+# ==============================================================================
+if page == "Quant A - Analyse Actif Unique":
+
+    st.title("🧠 Smart Quant Lab: Analyse & Optimisation")
+
+    # Initialisation session state
+    if "analyzer" not in st.session_state:
+        st.session_state.analyzer = None
+
+    with st.sidebar:
+        st.header("1. Paramètres Généraux")
+        ticker = st.text_input("Ticker", "BTC-USD")
+        s_date = st.date_input("Début", date(2020, 1, 1))
+        e_date = st.date_input("Fin", date.today())
+
+        if st.button("📥 Charger Données & Scanner"):
+            an = SingleAssetAnalyzer(ticker, s_date, e_date)
+            if an.load_data():
+                with st.spinner("Le robot cherche les meilleurs paramètres..."):
+                    an.find_best_params()  # On lance l'optimisation ici
+                st.session_state.analyzer = an
+                st.success("Scan terminé !")
+
+        st.markdown("---")
+
+        # Contrôles dynamiques
+        if st.session_state.analyzer:
+            an = st.session_state.analyzer
+
+            st.header("2. Contrôle Manuel")
+            strat_choice = st.selectbox(
+                "Stratégie Active",
+                ["Momentum", "Cross MMS", "Mean Reversion (BB)", "TOUT COMPARER"],
+            )
+
+            manual_params = {}
+
+            if strat_choice == "Momentum" or strat_choice == "TOUT COMPARER":
+                st.markdown("### 🚀 Momentum")
+                rec = an.best_params["Momentum"]["window"]
+                st.caption(f"💡 Suggestion IA : {rec}")
+                manual_params["mom_window"] = st.slider(
+                    "Fenêtre Momentum", 10, 200, 50, key="mom_slider"
+                )
+
+            if strat_choice == "Cross MMS" or strat_choice == "TOUT COMPARER":
+                st.markdown("### ❌ Cross MMS")
+                rec_s = an.best_params["Cross MMS"]["short_w"]
+                rec_l = an.best_params["Cross MMS"]["long_w"]
+                st.caption(f"💡 Suggestion IA : Court={rec_s}, Long={rec_l}")
+                manual_params["cross_short"] = st.slider(
+                    "MMS Court", 5, 50, 20, key="cross_s_slider"
+                )
+                manual_params["cross_long"] = st.slider(
+                    "MMS Long", 50, 200, 100, key="cross_l_slider"
+                )
+
+            if strat_choice == "Mean Reversion (BB)" or strat_choice == "TOUT COMPARER":
+                st.markdown("### 📉 Bollinger")
+                rec_w = an.best_params["Mean Reversion (BB)"]["window"]
+                rec_std = an.best_params["Mean Reversion (BB)"]["std_dev"]
+                st.caption(f"💡 Suggestion IA : Fenêtre={rec_w}, Std={rec_std}")
+                manual_params["bb_window"] = st.slider(
+                    "Fenêtre BB", 10, 100, 20, key="bb_w_slider"
+                )
+                manual_params["bb_std"] = st.slider(
+                    "Écart-Type", 1.0, 3.0, 2.0, key="bb_std_slider"
+                )
+            st.markdown("---")
+
+            st.header("3. Prédiction (Bonus)")
+            model_choice = st.selectbox(
+                "Choisir le Modèle", ["Linear Regression", "ARIMA", "Machine Learning (RF)"]
+            )
+            forecast_days = st.slider("Jours à prédire", 7, 90, 30)
+
+    # --- AFFICHAGE PRINCIPAL ---
+
+    if st.session_state.analyzer:
+        an = st.session_state.analyzer
+        bh_curve = (1 + an.daily_returns).cumprod() * an.initial_investment
+
+        # --- CAS 1 : COMPARAISON GLOBALE ---
+        if strat_choice == "TOUT COMPARER":
+            st.subheader("⚡ Comparaison Multi-Stratégies (Paramètres Manuels)")
+
+            c_mom, _ = an.run_strategy("Momentum", window=manual_params["mom_window"])
+            c_cross, _ = an.run_strategy(
+                "Cross MMS",
+                short_w=manual_params["cross_short"],
+                long_w=manual_params["cross_long"],
+            )
+            c_bb, _ = an.run_strategy(
+                "Mean Reversion (BB)",
+                window=manual_params["bb_window"],
+                std_dev=manual_params["bb_std"],
+            )
+
+            df_all = pd.DataFrame(
+                {
+                    "Buy & Hold": bh_curve,
+                    "Momentum": c_mom,
+                    "Cross MMS": c_cross,
+                    "Bollinger": c_bb,
+                }
+            )
+
+            fig_all = px.line(
+                df_all,
+                labels={
+                    "index": "Date",
+                    "value": "Valeur du portefeuille",
+                    "variable": "Stratégie",
+                },
+            )
+            st.plotly_chart(fig_all, use_container_width=True)
+
+            st.write("### Valeurs Finales du Portefeuille")
+            res_finaux = df_all.iloc[-1].sort_values(ascending=False)
+            st.dataframe(res_finaux.map("{:.2f} $".format))
+
+        # --- CAS 2 : MODE SOLO ---
+        else:
+            args = {}
+            if strat_choice == "Momentum":
+                args = {"window": manual_params["mom_window"]}
+            elif strat_choice == "Cross MMS":
+                args = {
+                    "short_w": manual_params["cross_short"],
+                    "long_w": manual_params["cross_long"],
+                }
+            elif strat_choice == "Mean Reversion (BB)":
+                args = {
+                    "window": manual_params["bb_window"],
+                    "std_dev": manual_params["bb_std"],
+                }
+
+            strat_curve, strat_rets = an.run_strategy(strat_choice, **args)
+            met_strat = an.compute_metrics(strat_rets)
+            met_bh = an.compute_metrics(an.daily_returns)
+
+            # Recalcul des signaux pour affichage graphique complet
+            signals = pd.Series(0, index=an.data.index)
+            indicator1 = None
+            indicator2 = None
+            label_ind1 = ""
+            label_ind2 = ""
+
+            if strat_choice == "Momentum":
+                win = manual_params["mom_window"]
+                mms = an.data["Close"].rolling(win).mean()
+                signals = np.where(an.data["Close"] > mms, 1.0, 0.0)
+                indicator1 = mms
+                label_ind1 = f"Moyenne Mobile ({win}j)"
+
+            elif strat_choice == "Cross MMS":
+                s, l = manual_params["cross_short"], manual_params["cross_long"]
+                short = an.data["Close"].rolling(s).mean()
+                long = an.data["Close"].rolling(l).mean()
+                signals = np.where(short > long, 1.0, 0.0)
+                indicator1 = short
+                label_ind1 = f"MMS Rapide ({s}j)"
+                indicator2 = long
+                label_ind2 = f"MMS Lente ({l}j)"
+
+            elif strat_choice == "Mean Reversion (BB)":
+                w, std = manual_params["bb_window"], manual_params["bb_std"]
+                mid = an.data["Close"].rolling(w).mean()
+                sigma = an.data["Close"].rolling(w).std()
+                lower = mid - (sigma * std)
+                signals = np.where(an.data["Close"] < lower, 1.0, 0.0)
+                indicator1 = lower
+                label_ind1 = "Bande Inférieure"
+
+            # Comptage des Ordres
+            signals = pd.Series(signals, index=an.data.index)
+            positions = signals.diff().fillna(0)
+            nb_trades = int(positions.abs().sum())
+
+            # KPI
+            c1, c2, c3, c4, c5 = st.columns(5)
+            c1.metric("Stratégie", strat_choice)
+            c2.metric(
+                "Sharpe Ratio",
+                met_strat["Sharpe"],
+                delta=f"{met_strat['Sharpe'] - met_bh['Sharpe']:.2f} vs B&H",
+            )
+            c3.metric("Max Drawdown", met_strat["Max Drawdown"])
+            c4.metric("Gain Total", met_strat["Total Perf"])
+            c5.metric(
+                "Nbr. Ordres",
+                nb_trades,
+                help="Nombre total d'achats et de ventes",
+            )
+
+            # Graphique Avancé en Plotly
+            st.subheader(f"📈 Analyse Détaillée : {strat_choice}")
+
+            fig_price = go.Figure()
+
+            # Prix
+            fig_price.add_trace(
+                go.Scatter(
+                    x=an.data.index,
+                    y=an.data["Close"],
+                    mode="lines",
+                    name="Prix Actif",
+                    line=dict(color="black"),
+                )
+            )
+
+            # Indicateurs
+            if indicator1 is not None:
+                fig_price.add_trace(
+                    go.Scatter(
+                        x=an.data.index,
+                        y=indicator1,
+                        mode="lines",
+                        name=label_ind1,
+                        line=dict(dash="dash", width=2),
+                    )
+                )
+
+            if indicator2 is not None:
+                fig_price.add_trace(
+                    go.Scatter(
+                        x=an.data.index,
+                        y=indicator2,
+                        mode="lines",
+                        name=label_ind2,
+                        line=dict(dash="dot", width=2),
+                    )
+                )
+
+            # Marqueurs Achat / Vente
+            buys = an.data.loc[positions == 1.0]
+            sells = an.data.loc[positions == -1.0]
+
+            if not buys.empty:
+                fig_price.add_trace(
+                    go.Scatter(
+                        x=buys.index,
+                        y=buys["Close"],
+                        mode="markers",
+                        name="Achat",
+                        marker=dict(symbol="triangle-up", color="green", size=10),
+                    )
+                )
+
+            if not sells.empty:
+                fig_price.add_trace(
+                    go.Scatter(
+                        x=sells.index,
+                        y=sells["Close"],
+                        mode="markers",
+                        name="Vente",
+                        marker=dict(symbol="triangle-down", color="red", size=10),
+                    )
+                )
+
+            fig_price.update_layout(
+                title=f"Signaux de Trading : {strat_choice} ({nb_trades} ordres)",
+                xaxis_title="Date",
+                yaxis_title="Prix",
+                legend_title="Légende",
+            )
+
+            st.plotly_chart(fig_price, use_container_width=True)
+
+        # 4. SECTION COMPARATIVE (Battle)
+        st.markdown("---")
+        st.subheader("⚔️ Battle Royale : Comparaison des Modèles Optimisés")
+        st.caption("Voici les résultats avec les MEILLEURS paramètres trouvés par l'IA.")
+
+        # Recalculs optimisés
+        curve_mom, ret_mom = an.run_strategy("Momentum", **an.best_params["Momentum"])
+        curve_cross, ret_cross = an.run_strategy("Cross MMS", **an.best_params["Cross MMS"])
+        curve_bb, ret_bb = an.run_strategy(
+            "Mean Reversion (BB)", **an.best_params["Mean Reversion (BB)"]
         )
 
-    w_raw = np.array(list(user_weights.values()))
-    w_user = w_raw / w_raw.sum()  # Normalisation pour sommer à 100%
+        df_battle = pd.DataFrame(
+            {
+                "Buy & Hold": bh_curve,
+                "Momentum (Opti)": curve_mom,
+                "Cross MMS (Opti)": curve_cross,
+                "Bollinger (Opti)": curve_bb,
+            }
+        )
 
-    st.write("### 📌 Poids normalisés appliqués :")
-    st.write({t: round(w_user[i], 4) for i, t in enumerate(tickers)})
+        fig_battle = px.line(
+            df_battle,
+            labels={
+                "index": "Date",
+                "value": "Valeur du portefeuille",
+                "variable": "Stratégie",
+            },
+        )
+        st.plotly_chart(fig_battle, use_container_width=True)
 
-    ret_u, vol_u, sharpe_u = compute_portfolio_stats(w_user, mean_returns, cov_matrix)
+        st.subheader("🏆 Le Bulletin de Notes")
+        met_bh = an.compute_metrics(an.daily_returns)
+        met_mom = an.compute_metrics(ret_mom)
+        met_cross = an.compute_metrics(ret_cross)
+        met_bb = an.compute_metrics(ret_bb)
 
-    st.subheader("📊 Performance du portefeuille personnalisé")
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Rendement annuel", f"{ret_u:.2%}")
-    c2.metric("Volatilité annuelle", f"{vol_u:.2%}")
-    c3.metric("Sharpe", f"{sharpe_u:.2f}")
-    # ==========================================================
+        leaderboard_data = [
+            {
+                "Stratégie": "Buy & Hold",
+                "Sharpe Ratio": met_bh["Sharpe"],
+                "Max Drawdown": met_bh["Max Drawdown"],
+                "Perf Totale": met_bh["Total Perf"],
+                "Capital Final": f"{bh_curve.iloc[-1]:.2f} $",
+            },
+            {
+                "Stratégie": "Momentum (IA)",
+                "Sharpe Ratio": met_mom["Sharpe"],
+                "Max Drawdown": met_mom["Max Drawdown"],
+                "Perf Totale": met_mom["Total Perf"],
+                "Capital Final": f"{curve_mom.iloc[-1]:.2f} $",
+            },
+            {
+                "Stratégie": "Cross MMS (IA)",
+                "Sharpe Ratio": met_cross["Sharpe"],
+                "Max Drawdown": met_cross["Max Drawdown"],
+                "Perf Totale": met_cross["Total Perf"],
+                "Capital Final": f"{curve_cross.iloc[-1]:.2f} $",
+            },
+            {
+                "Stratégie": "Bollinger (IA)",
+                "Sharpe Ratio": met_bb["Sharpe"],
+                "Max Drawdown": met_bb["Max Drawdown"],
+                "Perf Totale": met_bb["Total Perf"],
+                "Capital Final": f"{curve_bb.iloc[-1]:.2f} $",
+            },
+        ]
+        df_leaderboard = (
+            pd.DataFrame(leaderboard_data)
+            .set_index("Stratégie")
+            .sort_values(by="Sharpe Ratio", ascending=False)
+        )
+        st.dataframe(df_leaderboard, use_container_width=True)
 
-    st.subheader("🎯 Simulation Markowitz — Monte-Carlo")
+        # B. SECTION PRÉDICTION (Plotly)
+        st.markdown("---")
+        st.subheader(f"🔮 Prédiction Future : {model_choice}")
 
-    sim_results = {"ret": [], "vol": [], "sharpe": [], "weights": []}
+        with st.spinner(f"Calcul du modèle {model_choice} en cours..."):
+            fut_d, fut_p, std = an.predict_future(
+                forecast_days, model_type=model_choice
+            )
 
-    for _ in range(N_sim):
-        w = np.random.random(len(tickers))
-        w /= w.sum()
+        recent = an.data["Close"].tail(180)
+        df_fut = pd.DataFrame({"Pred": fut_p}, index=fut_d)
 
-        ret, vol, sharpe = compute_portfolio_stats(w, mean_returns, cov_matrix)
+        time_scaling = np.sqrt(np.arange(1, len(df_fut) + 1))
+        df_fut["High"] = df_fut["Pred"] + (1.96 * std * time_scaling)
+        df_fut["Low"] = df_fut["Pred"] - (1.96 * std * time_scaling)
 
-        sim_results["ret"].append(ret)
-        sim_results["vol"].append(vol)
-        sim_results["sharpe"].append(sharpe)
-        sim_results["weights"].append(w)
+        fig_pred = go.Figure()
+        fig_pred.add_trace(
+            go.Scatter(
+                x=recent.index,
+                y=recent.values,
+                mode="lines",
+                name="Historique Récent",
+                line=dict(color="black"),
+            )
+        )
+        fig_pred.add_trace(
+            go.Scatter(
+                x=df_fut.index,
+                y=df_fut["Pred"],
+                mode="lines",
+                name=f"Prédiction ({model_choice})",
+                line=dict(color="#0068C9", dash="dash"),
+            )
+        )
+        fig_pred.add_trace(
+            go.Scatter(
+                x=df_fut.index,
+                y=df_fut["High"],
+                mode="lines",
+                line=dict(width=0),
+                showlegend=False,
+            )
+        )
+        fig_pred.add_trace(
+            go.Scatter(
+                x=df_fut.index,
+                y=df_fut["Low"],
+                mode="lines",
+                fill="tonexty",
+                name="Zone de Confiance 95%",
+                line=dict(width=0),
+                fillcolor="rgba(0,104,201,0.15)",
+            )
+        )
 
-    df_random = pd.DataFrame(sim_results)
+        fig_pred.update_layout(
+            title=f"Projection {ticker} sur {forecast_days} jours",
+            xaxis_title="Date",
+            yaxis_title="Prix",
+            legend_title="Série",
+        )
 
-    idx_max = df_random["sharpe"].idxmax()
-    best_weights = df_random.loc[idx_max, "weights"]
+        st.plotly_chart(fig_pred, use_container_width=True)
 
-    st.success("Portefeuille Max Sharpe trouvé ✔")
+        if model_choice == "ARIMA":
+            st.info(
+                "ℹ️ **ARIMA** analyse les cycles passés. Idéal pour les marchés volatils à court terme, essayez de l'appliquer au bitcoin par exemple."
+            )
+        elif model_choice == "Machine Learning (RF)":
+            st.info(
+                "ℹ️ **Random Forest** utilise l'IA pour repérer des motifs complexes (prix d'hier, avant-hier, moyennes)."
+            )
+        else:
+            st.warning(
+                "⚠️ **Régression Linéaire** : Trace juste une tendance droite. Attention, ne prédit pas les chutes ! Ce modèle est plus adapté pour les  cours stables, essayez plutôt une action de père de famille, comme Air Liquide ;)"
+            )
 
-    df_w = pd.DataFrame(
-        {"Actifs": tickers, "Poids (%)": [round(w * 100, 2) for w in best_weights]}
-    )
-    st.dataframe(df_w)
+        ticker_clean = ticker.upper()
+        if "BTC" in ticker_clean and model_choice == "ARIMA":
+            st.success(
+                "✅ Excellent choix ! Le Bitcoin est très volatil et cyclique, ARIMA est théoriquement le meilleur modèle pour capturer ces mouvements."
+            )
+        elif ("AI.PA" in ticker_clean or "AIR LIQUIDE" in ticker_clean) and model_choice == "Linear Regression":
+            st.success(
+                "✅ Bien vu ! Air Liquide est une action très stable avec une tendance long terme claire. La Régression Linéaire suffit largement et sera très propre."
+            )
 
-    st.subheader("📈 Frontière de Markowitz ")
+    else:
+        st.info("👈 Veuillez cliquer sur 'Charger Données & Scanner' dans la barre latérale pour commencer.")
 
-    df_frontier = efficient_frontier(mean_returns, cov_matrix)
 
-    max_point = {
-        "ret": df_random.loc[idx_max, "ret"],
-        "vol": df_random.loc[idx_max, "vol"],
-    }
+# ==============================================================================
+#                                   MODULE QUANT B
+# ==============================================================================
+elif page == "Quant B - Gestion de Portefeuille":
 
-    plot_efficient_frontier(df_random, df_frontier, max_point)
+    st.header("📊 QuantB — Portfolio Multi-Assets (Markowitz & Monte-Carlo)")
+
+    with st.sidebar:
+        st.subheader("⚙ Paramètres du portefeuille – QuantB")
+
+        tickers = st.multiselect(
+            "Sélectionne plusieurs actifs :",
+            [
+                "AAPL",
+                "MSFT",
+                "GOOG",
+                "AMZN",
+                "META",
+                "TSLA",  # USA
+                "BTC-USD",  # Crypto
+                "AI.PA",
+                "TTE.PA",  # France
+                "GC=F",  # Or
+                "^GSPC",  # S&P500
+            ],
+            default=["AAPL", "MSFT", "BTC-USD", "AI.PA", "TTE.PA"],
+        )
+
+        start_b = st.date_input("Date de début", date(2020, 1, 1))
+        end_b = st.date_input("Date de fin", date.today())
+        rf_qb = st.number_input("Taux sans risque annuel", value=0.02, step=0.005)
+        N_sim = st.slider(
+            "Nombre de portefeuilles simulés (Monte Carlo)",
+            min_value=500,
+            max_value=10000,
+            value=3000,
+            step=500,
+        )
+
+        capital_init = st.number_input(
+            "Capital initial du portefeuille", value=10000.0, step=1000.0
+        )
+
+        # --- Poids cibles saisis par l'utilisateur (en %) + renormalisation ---
+        target_weights_raw = []
+        if len(tickers) > 0:
+            default_w = round(100.0 / len(tickers), 2)
+
+            st.markdown("### ⚖️ Poids cibles du portefeuille (%)")
+            st.caption(
+                "Tu peux saisir n'importe quels pourcentages, "
+                "ils seront automatiquement renormalisés pour sommer à 100 %."
+            )
+
+            for t in tickers:
+                w = st.number_input(
+                    f"Poids pour {t}",
+                    min_value=0.0,
+                    max_value=100.0,
+                    value=default_w,
+                    step=1.0,
+                    key=f"w_target_{t}",
+                )
+                target_weights_raw.append(w)
+
+            total_raw = sum(target_weights_raw)
+
+            if total_raw == 0:
+                target_weights = np.array([1.0 / len(tickers)] * len(tickers))
+            else:
+                target_weights = np.array(target_weights_raw) / total_raw
+
+            st.caption(
+                f"Somme saisie : {total_raw:.2f}% → utilisée après renormalisation : 100.00 %"
+            )
+        else:
+            target_weights = np.array([])
+
+    # ---------- Exécution Quant B ----------
+    if len(tickers) >= 2:
+
+        st.subheader("📥 Téléchargement des données")
+        df_prices = load_multi_assets(tickers, start_b, end_b)
+        returns = df_prices.pct_change().dropna()
+        st.success("Données chargées !")
+
+        # Valeurs normalisées (Plotly)
+        st.subheader("📈 Valeur cumulée des actifs (Base 100)")
+        norm = df_prices / df_prices.iloc[0] * 100
+        fig_norm = px.line(
+            norm,
+            labels={"index": "Date", "value": "Valeur (base 100)", "variable": "Actif"},
+        )
+        st.plotly_chart(fig_norm, use_container_width=True)
+
+        # Corrélation
+        st.subheader("🔗 Matrice de corrélation")
+        st.dataframe(returns.corr())
+
+        # Monte-Carlo Markowitz
+        st.subheader("🎯 Simulation Markowitz — Monte-Carlo")
+        mean_returns = returns.mean()
+        cov_matrix = returns.cov()
+
+        sim_results = {"ret": [], "vol": [], "sharpe": [], "weights": []}
+
+        # Simulation
+        for _ in range(N_sim):
+            w = np.random.random(len(tickers))
+            w /= w.sum()
+
+            ret, vol, sharpe = compute_portfolio_stats(w, mean_returns, cov_matrix, rf_qb)
+
+            sim_results["ret"].append(ret)
+            sim_results["vol"].append(vol)
+            sim_results["sharpe"].append(sharpe)
+            sim_results["weights"].append(w)
+
+        df_random = pd.DataFrame(sim_results)
+
+        # Meilleur Sharpe
+        idx_max = df_random["sharpe"].idxmax()
+        best_weights = df_random.loc[idx_max, "weights"]
+
+        st.success("Portefeuille Max Sharpe trouvé ✔")
+
+        # Tableau poids Max Sharpe + Poids Cibles normalisés
+        df_w = pd.DataFrame(
+            {
+                "Actifs": tickers,
+                "Poids Max Sharpe (%)": [round(w * 100, 2) for w in best_weights],
+                "Poids Cible (%)": [round(w * 100, 2) for w in target_weights],
+            }
+        )
+        st.dataframe(df_w)
+
+        # ---------- FRONTIERE DE MARKOWITZ (Plotly) ----------
+        st.subheader("📈 Frontière de Markowitz ")
+
+        df_frontier = efficient_frontier(mean_returns, cov_matrix, rf_qb)
+
+        max_point = {
+            "ret": df_random.loc[idx_max, "ret"],
+            "vol": df_random.loc[idx_max, "vol"],
+        }
+
+        plot_efficient_frontier(df_random, df_frontier, max_point)
+
+        # ---------- PORTFEUILLE RÉÉQUILIBRÉ AVEC POIDS CIBLES ----------
+        st.subheader("💼 Évolution du portefeuille rééquilibré (poids cibles)")
+
+        port_values = simulate_rebalanced_portfolio(
+            returns[tickers], target_weights, initial_capital=capital_init
+        )
+
+        fig_port = px.line(
+            port_values,
+            labels={"index": "Date", "value": "Valeur du portefeuille"},
+        )
+        st.plotly_chart(fig_port, use_container_width=True)
+
+        st.caption(
+            "Le portefeuille est simulé en appliquant les poids cibles renormalisés à chaque pas de temps "
+            "(stratégie constant-mix avec rééquilibrage automatique)."
+        )
+
+        # (Optionnel : Camembert des poids cibles)
+        fig_pie = px.pie(
+            names=tickers,
+            values=target_weights,
+            title="Répartition actuelle des poids cibles",
+        )
+        st.plotly_chart(fig_pie, use_container_width=True)
+
+    else:
+        st.warning("Veuillez sélectionner au moins 2 actifs dans la barre latérale.")
+
+
+# ==============================================================================
+#                                 ESPACE ADMIN RAPPORTS
+# ==============================================================================
+with st.sidebar:
+    st.markdown("---")
+    st.header("📂 Espace Admin")
+
+    report_folder = "reports"
+
+    if os.path.exists(report_folder) and os.listdir(report_folder):
+        files = [f for f in os.listdir(report_folder) if f.endswith(".txt")]
+        files.sort(reverse=True)
+
+        if files:
+            selected_file = st.selectbox("Choisir un rapport :", files)
+
+            if st.button("Lire le rapport"):
+                with open(os.path.join(report_folder, selected_file), "r") as f:
+                    st.session_state["log_content"] = f.read()
+    else:
+        st.caption("Aucun rapport disponible pour le moment.")
+
+# Affichage du contenu du rapport (si on a cliqué sur Lire)
+if "log_content" in st.session_state:
+    st.markdown("---")
+    st.subheader("📄 Visualiseur de Rapport")
+    st.text_area("Contenu du fichier :", st.session_state["log_content"], height=300)
+
+    if st.button("Fermer le rapport"):
+        del st.session_state["log_content"]
+        st.rerun()
