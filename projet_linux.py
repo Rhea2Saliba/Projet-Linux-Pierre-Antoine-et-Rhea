@@ -1,4 +1,3 @@
-
 import streamlit as st
 import yfinance as yf
 import pandas as pd
@@ -9,7 +8,6 @@ from statsmodels.tsa.arima.model import ARIMA
 from datetime import date, timedelta
 import itertools
 
-# NEW: Plotly
 import plotly.express as px
 import plotly.graph_objects as go
 
@@ -381,7 +379,6 @@ if st.session_state.analyzer:
             {"Buy & Hold (Marché)": bh_curve, f"Ma Stratégie ({strat_choice})": strat_curve}
         )
 
-        # Couleurs proches de ta version
         color_map = {}
         cols = df_chart.columns.tolist()
         if len(cols) > 0:
@@ -701,9 +698,35 @@ if len(tickers) >= 2:
     st.subheader("🔗 Matrice de corrélation")
     st.dataframe(returns.corr())
 
-    st.subheader("🎯 Simulation Markowitz — Monte-Carlo")
+    # ======= ➤ NOUVELLE SECTION : POIDS PERSONNALISÉS =========
+    st.subheader("🎛️ Poids personnalisés du portefeuille")
+
     mean_returns = returns.mean()
     cov_matrix = returns.cov()
+
+    user_weights = {}
+    for t in tickers:
+        user_weights[t] = st.slider(
+            f"Poids de {t}",
+            0.0, 1.0, 1.0 / len(tickers), 0.01
+        )
+
+    w_raw = np.array(list(user_weights.values()))
+    w_user = w_raw / w_raw.sum()  # Normalisation pour sommer à 100%
+
+    st.write("### 📌 Poids normalisés appliqués :")
+    st.write({t: round(w_user[i], 4) for i, t in enumerate(tickers)})
+
+    ret_u, vol_u, sharpe_u = compute_portfolio_stats(w_user, mean_returns, cov_matrix)
+
+    st.subheader("📊 Performance du portefeuille personnalisé")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Rendement annuel", f"{ret_u:.2%}")
+    c2.metric("Volatilité annuelle", f"{vol_u:.2%}")
+    c3.metric("Sharpe", f"{sharpe_u:.2f}")
+    # ==========================================================
+
+    st.subheader("🎯 Simulation Markowitz — Monte-Carlo")
 
     sim_results = {"ret": [], "vol": [], "sharpe": [], "weights": []}
 
